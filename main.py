@@ -317,7 +317,6 @@ def get_fcm_access_token():
             scopes=["https://www.googleapis.com/auth/firebase.messaging"],
         )
 
-    # Refrescar únicamente si venció o es inválido
     if not fcm_credentials.valid:
         fcm_credentials.refresh(Request())
 
@@ -350,7 +349,8 @@ def format_local_time(timestamp_ms, lat, lng):
 
 
 def fetch_usgs_events():
-    """Consulta el feed GeoJSON de la USGS."""
+    """Consulta el feed GeoJSON de la USGS midiendo tiempos de respuesta."""
+    start_time = time.time()
     timestamp_param = int(time.time())
     usgs_url = f"https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson?t={timestamp_param}"
     headers = {
@@ -363,9 +363,13 @@ def fetch_usgs_events():
     events = []
     try:
         response = http_session.get(usgs_url, headers=headers, timeout=8)
+        elapsed_ms = round((time.time() - start_time) * 1000, 2)
+
         if response.status_code == 200:
             data = response.json()
-            for feat in data.get("features", []):
+            features = data.get("features", [])
+            
+            for feat in features:
                 props = feat.get("properties", {})
                 geom = feat.get("geometry", {})
                 coords = geom.get("coordinates", [0, 0, 0])
@@ -381,19 +385,23 @@ def fetch_usgs_events():
                     "timestamp_ms": props.get("time", 0),
                     "url": props.get("url", "")
                 })
+
+            logging.debug(f"🔍 [USGS] Consulta finalizada en {elapsed_ms} ms. Eventos recibidos: {len(events)}")
         else:
-            logging.warning(f"⚠️ USGS API devolvió código HTTP {response.status_code}")
+            logging.warning(f"⚠️ [USGS] API devolvió código HTTP {response.status_code} ({elapsed_ms} ms)")
     except Exception as e:
-        logging.error(f"❌ Error consultando API de USGS: {e}")
+        elapsed_ms = round((time.time() - start_time) * 1000, 2)
+        logging.error(f"❌ [USGS] Error consultando API ({elapsed_ms} ms): {e}")
         
     return events
 
 
 def fetch_emsc_events():
     """
-    Consulta la API de EMSC (Centro Sismológico Euro-Mediterráneo).
-    Cubre sismos globales y agencias locales como FUNVISIS (Venezuela) en tiempo récord.
+    Consulta la API de EMSC (Centro Sismológico Euro-Mediterráneo) midiendo tiempos de respuesta.
+    Cubre sismos globales y agencias locales como FUNVISIS (Venezuela).
     """
+    start_time = time.time()
     emsc_url = "https://www.seismicportal.eu/fdsnws/event/1/query?format=json&limit=30"
     headers = {
         "User-Agent": "EpicentroMonitor/2.0 (Android Earthquake Alert System)",
@@ -403,14 +411,17 @@ def fetch_emsc_events():
     events = []
     try:
         response = http_session.get(emsc_url, headers=headers, timeout=8)
+        elapsed_ms = round((time.time() - start_time) * 1000, 2)
+
         if response.status_code == 200:
             data = response.json()
-            for feat in data.get("features", []):
+            features = data.get("features", [])
+            
+            for feat in features:
                 props = feat.get("properties", {})
                 geom = feat.get("geometry", {})
                 coords = geom.get("coordinates", [0, 0, 0])
                 
-                # Parsear fecha ISO 8601 en UTC a Timestamp milisegundos
                 time_str = props.get("time")
                 timestamp_ms = 0
                 if time_str:
@@ -428,10 +439,13 @@ def fetch_emsc_events():
                     "timestamp_ms": timestamp_ms,
                     "url": f"https://www.emsc-csem.org/Earthquake/earthquake.php?id={feat.get('id')}"
                 })
+
+            logging.debug(f"🔍 [EMSC] Consulta finalizada en {elapsed_ms} ms. Eventos recibidos: {len(events)}")
         else:
-            logging.warning(f"⚠️ EMSC API devolvió código HTTP {response.status_code}")
+            logging.warning(f"⚠️ [EMSC] API devolvió código HTTP {response.status_code} ({elapsed_ms} ms)")
     except Exception as e:
-        logging.error(f"❌ Error consultando API de EMSC: {e}")
+        elapsed_ms = round((time.time() - start_time) * 1000, 2)
+        logging.error(f"❌ [EMSC] Error consultando API ({elapsed_ms} ms): {e}")
 
     return events
 
@@ -444,12 +458,10 @@ def process_and_notify_event(sismo, access_token):
     max_age_ms = 60 * 60 * 1000  # Tolerancia de 60 minutos
     delay_minutes = round((now_ms - timestamp_ms) / 60000, 1)
 
-    # Descartar sismos antiguos
     if (now_ms - timestamp_ms) > max_age_ms:
-        logging.debug(f"ℹ️ Evento {event_id} descartado por antigüedad antigua ({delay_minutes} min).")
+        logging.debug(f"ℹ️ Evento {event_id} [{sismo['source']}] descartado por antigüedad antigua ({delay_minutes} min).")
         return
 
-    # Formateo de Magnitud
     raw_mag = sismo["magnitude"]
     mag = f"{float(raw_mag):.1f}" if raw_mag is not None else "N/A"
 
@@ -464,9 +476,9 @@ def process_and_notify_event(sismo, access_token):
     event_url = sismo["url"]
     source = sismo["source"]
 
-    # Formateo de hora según ubicación exacta
     sismo_time = format_local_time(timestamp_ms, float_lat, float_lng)
 
+    # Log detallado manteniendo la estructura exacta original + la fuente explicitada
     logging.info(
         f"🚨 ¡NUEVO SISMO DETECTADO! Evento: {event_id} [{source}] | M{mag} - {place} "
         f"| Hora: {sismo_time} | Profundidad: {depth_str} | Retraso {source}: {delay_minutes} min"
@@ -475,7 +487,6 @@ def process_and_notify_event(sismo, access_token):
     map_url = get_static_map_url(lat_str, lng_str)
     fcm_url = f"https://fcm.googleapis.com/v1/projects/{PROJECT_ID}/messages:send"
 
-    # Construcción del Payload de Notificación PUSH de alta prioridad
     payload = {
         "message": {
             "topic": "sismos_alertas",
@@ -504,15 +515,15 @@ def process_and_notify_event(sismo, access_token):
         "Content-Type": "application/json",
     }
 
-    # Enviar notificación Push vía Firebase Cloud Messaging
+    fcm_start_time = time.time()
     res = http_session.post(fcm_url, headers=headers_fcm, data=json.dumps(payload), timeout=8)
+    fcm_elapsed_ms = round((time.time() - fcm_start_time) * 1000, 2)
 
     if res.status_code == 200:
-        logging.info(f"✅ Notificación enviada con éxito a FCM para el sismo {event_id}")
+        logging.info(f"✅ Notificación enviada con éxito a FCM para el sismo {event_id} ({fcm_elapsed_ms} ms)")
     else:
-        logging.error(f"❌ Error al enviar notificación a FCM ({res.status_code}): {res.text}")
+        logging.error(f"❌ Error al enviar notificación a FCM ({res.status_code}) [{fcm_elapsed_ms} ms]: {res.text}")
 
-    # Registrar en memoria para evitar re-notificar el mismo evento
     PROCESSED_EVENTS.add(event_id)
     if len(PROCESSED_EVENTS) > MAX_CACHE_SIZE:
         PROCESSED_EVENTS.pop()
@@ -521,10 +532,10 @@ def process_and_notify_event(sismo, access_token):
 def check_earthquakes_and_notify():
     """
     RUTINA PRINCIPAL DE MONITOREO EN TIEMPO REAL:
-    Consulta USGS y EMSC de forma combinada, procesa y transmite eventos únicos.
+    Consulta USGS y EMSC de forma combinada, procesa y transmite eventos únicos midiendo la latencia total.
     """
+    cycle_start = time.time()
     try:
-        # Obtener eventos de ambas redes
         usgs_events = fetch_usgs_events()
         emsc_events = fetch_emsc_events()
         
@@ -537,18 +548,20 @@ def check_earthquakes_and_notify():
         for sismo in all_events:
             event_id = sismo.get("id")
 
-            # Descartar si el evento carece de ID o ya fue procesado
             if not event_id or event_id in PROCESSED_EVENTS:
                 continue
 
-            # Obtener token FCM únicamente cuando haya al menos un sismo válido por notificar
             if not access_token:
                 access_token = get_fcm_access_token()
 
             process_and_notify_event(sismo, access_token)
 
+        total_elapsed = round((time.time() - cycle_start) * 1000, 2)
+        logging.debug(f"⏱️ Ciclo de monitoreo completado en {total_elapsed} ms. Eventos escaneados: {len(all_events)}")
+
     except Exception as e:
-        logging.error(f"❌ Error inesperado en rutina de sismos: {e}", exc_info=True)
+        total_elapsed = round((time.time() - cycle_start) * 1000, 2)
+        logging.error(f"❌ Error inesperado en rutina de sismos ({total_elapsed} ms): {e}", exc_info=True)
 
 
 def worker_loop():
