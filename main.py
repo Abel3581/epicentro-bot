@@ -282,10 +282,26 @@ fcm_credentials = None
 # Inicializador de zona horaria por coordenadas GPS
 tf = TimezoneFinder()
 
-# Sesión HTTP reutilizable para máxima velocidad (Keep-Alive + Retries)
-http_session = requests.Session()
-retries = Retry(total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
-http_session.mount("https://", HTTPAdapter(max_retries=retries))
+# Configuración del adaptador de reintentos para manejar sockets caídos
+retries = Retry(
+    total=3,
+    backoff_factor=0.3,
+    status_forcelist=[500, 502, 503, 504],
+    raise_on_status=False,
+)
+adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+
+
+def create_http_session():
+    """Crea una sesión HTTP optimizada con reintentos para evitar ConnectionResetError."""
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+# Sesión HTTP reutilizable global
+http_session = create_http_session()
 
 
 @app.route("/")
@@ -395,7 +411,7 @@ def fetch_usgs_events():
 
 
 def fetch_emsc_events():
-    """Consulta la API de EMSC midiendo tiempos de respuesta de forma ultra-rápida."""
+    """Consulta la API de EMSC midiendo tiempos de respuesta."""
     start_time = time.time()
     emsc_url = "https://www.seismicportal.eu/fdsnws/event/1/query?format=json&limit=30"
     headers = {
@@ -424,7 +440,7 @@ def fetch_emsc_events():
                     timestamp_ms = int(dt.timestamp() * 1000)
 
                 raw_unid = feat.get("id") or props.get("unid")
-                # Enlace canónico directo que evita errores al abrir la app móvil
+                # URL compatible con la vista web de la aplicación móvil
                 event_url = props.get("url") or f"https://www.seismicportal.eu/eventdetails.html?unid={raw_unid}"
 
                 events.append({
@@ -528,7 +544,8 @@ def process_and_notify_event(sismo, access_token):
 
 
 def check_earthquakes_and_notify():
-    """Rutina principal: obtiene datos de ambas fuentes y notifica midiendo el tiempo total."""
+    """Rutina principal: obtiene datos de ambas fuentes y maneja reseteos de sockets HTTP."""
+    global http_session
     cycle_start = time.time()
     try:
         usgs_events = fetch_usgs_events()
@@ -554,13 +571,17 @@ def check_earthquakes_and_notify():
         total_elapsed = round((time.time() - cycle_start) * 1000, 2)
         logging.info(f"⏱️ Ciclo de monitoreo completado en {total_elapsed} ms. Total procesados: {len(all_events)}")
 
+    except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
+        total_elapsed = round((time.time() - cycle_start) * 1000, 2)
+        logging.warning(f"⚠️ Conexión reseteada por el servidor ({total_elapsed} ms). Recreando sesión HTTP...")
+        http_session = create_http_session()
     except Exception as e:
         total_elapsed = round((time.time() - cycle_start) * 1000, 2)
         logging.error(f"❌ Error inesperado en rutina de sismos ({total_elapsed} ms): {e}", exc_info=True)
 
 
 def worker_loop():
-    """Bucle del worker ejecutándose cada 15 segundos."""
+    """Bucle del worker ejecutándose continuamente cada 15 segundos."""
     logging.info("🚀 Worker de Monitoreo Sísmico activo. Consultando USGS + EMSC en paralelo...")
     while True:
         try:
