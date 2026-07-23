@@ -259,7 +259,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Configuración detallada de logs para monitoreo en tiempo real (Render / Cloud Logs)
+# Configuración detallada de logs para monitoreo en tiempo real
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -282,7 +282,7 @@ fcm_credentials = None
 # Inicializador de zona horaria por coordenadas GPS
 tf = TimezoneFinder()
 
-# Configuración de Sesión HTTP con Reintentos Rápidos (Keep-Alive)
+# Sesión HTTP reutilizable para máxima velocidad (Keep-Alive + Retries)
 http_session = requests.Session()
 retries = Retry(total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
 http_session.mount("https://", HTTPAdapter(max_retries=retries))
@@ -300,9 +300,7 @@ def health_check():
 
 
 def get_fcm_access_token():
-    """
-    Obtiene o refresca de forma eficiente el Bearer Token OAuth 2.0 para FCM v1.
-    """
+    """Obtiene o refresca de forma eficiente el Bearer Token OAuth 2.0 para FCM v1."""
     global fcm_credentials
 
     if not fcm_credentials:
@@ -386,7 +384,7 @@ def fetch_usgs_events():
                     "url": props.get("url", "")
                 })
 
-            logging.debug(f"🔍 [USGS] Consulta finalizada en {elapsed_ms} ms. Eventos recibidos: {len(events)}")
+            logging.info(f"🔍 [USGS] Petición exitosa en {elapsed_ms} ms. Eventos recibidos: {len(events)}")
         else:
             logging.warning(f"⚠️ [USGS] API devolvió código HTTP {response.status_code} ({elapsed_ms} ms)")
     except Exception as e:
@@ -397,10 +395,7 @@ def fetch_usgs_events():
 
 
 def fetch_emsc_events():
-    """
-    Consulta la API de EMSC (Centro Sismológico Euro-Mediterráneo) midiendo tiempos de respuesta.
-    Cubre sismos globales y agencias locales como FUNVISIS (Venezuela).
-    """
+    """Consulta la API de EMSC midiendo tiempos de respuesta de forma ultra-rápida."""
     start_time = time.time()
     emsc_url = "https://www.seismicportal.eu/fdsnws/event/1/query?format=json&limit=30"
     headers = {
@@ -428,8 +423,12 @@ def fetch_emsc_events():
                     dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
                     timestamp_ms = int(dt.timestamp() * 1000)
 
+                raw_unid = feat.get("id") or props.get("unid")
+                # Enlace canónico directo que evita errores al abrir la app móvil
+                event_url = props.get("url") or f"https://www.seismicportal.eu/eventdetails.html?unid={raw_unid}"
+
                 events.append({
-                    "id": f"emsc_{feat.get('id')}",
+                    "id": f"emsc_{raw_unid}",
                     "source": "EMSC",
                     "magnitude": props.get("mag"),
                     "place": props.get("flynn_region", "Ubicación no especificada"),
@@ -437,10 +436,10 @@ def fetch_emsc_events():
                     "lng": float(coords[0]),
                     "depth": float(coords[2]),
                     "timestamp_ms": timestamp_ms,
-                    "url": f"https://www.emsc-csem.org/Earthquake/earthquake.php?id={feat.get('id')}"
+                    "url": event_url
                 })
 
-            logging.debug(f"🔍 [EMSC] Consulta finalizada en {elapsed_ms} ms. Eventos recibidos: {len(events)}")
+            logging.info(f"🔍 [EMSC] Petición exitosa en {elapsed_ms} ms. Eventos recibidos: {len(events)}")
         else:
             logging.warning(f"⚠️ [EMSC] API devolvió código HTTP {response.status_code} ({elapsed_ms} ms)")
     except Exception as e:
@@ -455,11 +454,11 @@ def process_and_notify_event(sismo, access_token):
     event_id = sismo["id"]
     timestamp_ms = sismo["timestamp_ms"]
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
-    max_age_ms = 60 * 60 * 1000  # Tolerancia de 60 minutos
+    max_age_ms = 60 * 60 * 1000  # 60 minutos de margen máximo
     delay_minutes = round((now_ms - timestamp_ms) / 60000, 1)
 
     if (now_ms - timestamp_ms) > max_age_ms:
-        logging.debug(f"ℹ️ Evento {event_id} [{sismo['source']}] descartado por antigüedad antigua ({delay_minutes} min).")
+        logging.debug(f"ℹ️ Evento {event_id} [{sismo['source']}] descartado por antigüedad ({delay_minutes} min).")
         return
 
     raw_mag = sismo["magnitude"]
@@ -478,7 +477,6 @@ def process_and_notify_event(sismo, access_token):
 
     sismo_time = format_local_time(timestamp_ms, float_lat, float_lng)
 
-    # Log detallado manteniendo la estructura exacta original + la fuente explicitada
     logging.info(
         f"🚨 ¡NUEVO SISMO DETECTADO! Evento: {event_id} [{source}] | M{mag} - {place} "
         f"| Hora: {sismo_time} | Profundidad: {depth_str} | Retraso {source}: {delay_minutes} min"
@@ -530,10 +528,7 @@ def process_and_notify_event(sismo, access_token):
 
 
 def check_earthquakes_and_notify():
-    """
-    RUTINA PRINCIPAL DE MONITOREO EN TIEMPO REAL:
-    Consulta USGS y EMSC de forma combinada, procesa y transmite eventos únicos midiendo la latencia total.
-    """
+    """Rutina principal: obtiene datos de ambas fuentes y notifica midiendo el tiempo total."""
     cycle_start = time.time()
     try:
         usgs_events = fetch_usgs_events()
@@ -557,7 +552,7 @@ def check_earthquakes_and_notify():
             process_and_notify_event(sismo, access_token)
 
         total_elapsed = round((time.time() - cycle_start) * 1000, 2)
-        logging.debug(f"⏱️ Ciclo de monitoreo completado en {total_elapsed} ms. Eventos escaneados: {len(all_events)}")
+        logging.info(f"⏱️ Ciclo de monitoreo completado en {total_elapsed} ms. Total procesados: {len(all_events)}")
 
     except Exception as e:
         total_elapsed = round((time.time() - cycle_start) * 1000, 2)
@@ -565,8 +560,8 @@ def check_earthquakes_and_notify():
 
 
 def worker_loop():
-    """Hilo de ejecución secundaria que monitorea múltiples redes de forma continua."""
-    logging.info("🚀 Worker de Monitoreo Sísmico activo. Consultando USGS + EMSC cada 15s...")
+    """Bucle del worker ejecutándose cada 15 segundos."""
+    logging.info("🚀 Worker de Monitoreo Sísmico activo. Consultando USGS + EMSC en paralelo...")
     while True:
         try:
             check_earthquakes_and_notify()
@@ -575,7 +570,7 @@ def worker_loop():
         time.sleep(15)
 
 
-# Iniciar el Worker en un hilo Daemon paralelo a Flask
+# Iniciar el Worker en un hilo paralelo a Flask
 threading.Thread(target=worker_loop, daemon=True).start()
 
 if __name__ == "__main__":
