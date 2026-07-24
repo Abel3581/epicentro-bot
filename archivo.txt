@@ -1,0 +1,25 @@
+com.sismo.epicentro/
+│
+├── data/
+│   └── local/
+│       ├── dao/
+│       │   └── NotificationDao.kt       👈 [NUEVO] Las consultas SQL (Insert, Get, Delete)
+│       ├── entity/
+│       │   └── NotificationEntity.kt    👈 [NUEVO] La tabla en la Base de Datos
+│       └── AppDatabase.kt               👈 [MODIFICAR] O Crear si no tenés la DB de Room
+│   └── repository/
+│       └── NotificationRepositoryImpl.kt👈 [NUEVO] Implementación de los datos
+│
+├── domain/
+│   ├── model/
+│   │   └── NotificationModel.kt         👈 [NUEVO] Modelo limpio para la vista
+│   ├── repository/
+│   │   └── NotificationRepository.kt    👈 [NUEVO] Interfaz del repositorio
+│   └── useCase/
+│       ├── GetNotificationsUseCase.kt   👈 [NUEVO] Caso de uso: Leer historial
+│       └── SaveNotificationUseCase.kt  👈 [NUEVO] Caso de uso: Guardar y borrar viejas
+│
+└── presentation/
+    └── notifications/
+        ├── NotificationsScreen.kt       👈 [NUEVO] La pantalla con la LazyColumn (Cards)
+        └── NotificationsViewModel.kt    👈 [NUEVO] El ViewModel que pide los datos
