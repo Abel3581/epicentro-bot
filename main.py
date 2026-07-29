@@ -354,6 +354,738 @@
 # if __name__ == "__main__":
 #     port = int(os.environ.get("PORT", 10000))
 #     app.run(host="0.0.0.0", port=port)
+# import json
+# import logging
+# import os
+# import threading
+# import time
+# from datetime import datetime, timezone
+# from zoneinfo import ZoneInfo
+# from timezonefinder import TimezoneFinder
+
+# import google.auth
+# from google.auth.transport.requests import Request
+# from google.oauth2 import service_account
+# from flask import Flask, jsonify
+# import requests
+# from requests.adapters import HTTPAdapter
+# from urllib3.util.retry import Retry
+
+# # Configuración detallada de logs para monitoreo en tiempo real
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format="%(asctime)s [%(levelname)s] %(message)s",
+#     datefmt="%Y-%m-%d %H:%M:%S",
+# )
+
+# app = Flask(__name__)
+
+# # Configuración del proyecto Firebase y APIs externas
+# PROJECT_ID = "epicentro-66146"
+# GEOAPIFY_KEY = "3fad5afd6cf6486192be6561c4e7462a"
+
+# # Caché en memoria de IDs y Fingerprints procesados para evitar duplicados
+# PROCESSED_EVENTS = set()
+# PROCESSED_FINGERPRINTS = set()
+# MAX_CACHE_SIZE = 2000
+
+# # Caché global para el token OAuth2 de FCM
+# fcm_credentials = None
+
+# # Inicializador de zona horaria por coordenadas GPS
+# tf = TimezoneFinder()
+
+# # Configuración del adaptador de reintentos para manejar sockets caídos
+# retries = Retry(
+#     total=3,
+#     backoff_factor=0.3,
+#     status_forcelist=[500, 502, 503, 504],
+#     raise_on_status=False,
+# )
+# adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+
+
+# def create_http_session():
+#     """Crea una sesión HTTP optimizada con reintentos para evitar ConnectionResetError."""
+#     session = requests.Session()
+#     session.mount("https://", adapter)
+#     session.mount("http://", adapter)
+#     return session
+
+
+# # Sesión HTTP reutilizable global
+# http_session = create_http_session()
+
+
+# @app.route("/")
+# def health_check():
+#     """Endpoint de verificación de estado y métricas del worker."""
+#     return jsonify({
+#         "status": "online",
+#         "service": "Epicentro Realtime Seismic Worker",
+#         "processed_events_count": len(PROCESSED_EVENTS),
+#         "processed_fingerprints_count": len(PROCESSED_FINGERPRINTS),
+#         "timestamp": datetime.now(timezone.utc).isoformat()
+#     }), 200
+
+
+# def get_fcm_access_token():
+#     """Obtiene o refresca de forma eficiente el Bearer Token OAuth 2.0 para FCM v1."""
+#     global fcm_credentials
+
+#     if not fcm_credentials:
+#         service_account_env = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+#         if not service_account_env:
+#             logging.error("❌ CRÍTICO: La variable FIREBASE_SERVICE_ACCOUNT no está configurada.")
+#             raise ValueError("❌ Falta la variable de entorno FIREBASE_SERVICE_ACCOUNT")
+
+#         service_account_info = json.loads(service_account_env)
+#         fcm_credentials = service_account.Credentials.from_service_account_info(
+#             service_account_info,
+#             scopes=["https://www.googleapis.com/auth/firebase.messaging"],
+#         )
+
+#     if not fcm_credentials.valid:
+#         fcm_credentials.refresh(Request())
+
+#     return fcm_credentials.token
+
+
+# def get_static_map_url(lat, lng):
+#     """Construye la URL para obtener el mapa estático en Geoapify."""
+#     return (
+#         f"https://maps.geoapify.com/v1/staticmap"
+#         f"?style=osm-bright&width=600&height=300"
+#         f"&center=lonlat:{lng},{lat}&zoom=7"
+#         f"&marker=lonlat:{lng},{lat};color:%23ff0000;size:medium"
+#         f"&apiKey={GEOAPIFY_KEY}"
+#     )
+
+
+# def format_local_time(timestamp_ms, lat, lng):
+#     """Calcula y formatea la hora exacta del evento según la zona horaria de las coordenadas."""
+#     utc_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+#     try:
+#         tz_name = tf.timezone_at(lat=lat, lng=lng)
+#         if tz_name:
+#             local_dt = utc_dt.astimezone(ZoneInfo(tz_name))
+#             return local_dt.strftime("%H:%M HS (Local)")
+#     except Exception as e:
+#         logging.warning(f"⚠️ No se pudo determinar huso horario local para ({lat}, {lng}): {e}")
+    
+#     return utc_dt.strftime("%H:%M UTC")
+
+
+# def generate_event_fingerprint(lat, lng, mag, timestamp_ms):
+#     """
+#     Genera una huella digital espacial y temporal para detectar el mismo sismo 
+#     procedente de distintas fuentes (ej. USGS y EMSC).
+#     """
+#     lat_round = round(float(lat), 1)
+#     lng_round = round(float(lng), 1)
+#     mag_round = round(float(mag), 1) if mag is not None else 0.0
+#     time_window = timestamp_ms // (15 * 60 * 1000)  # Ventana de 15 minutos
+#     return f"{lat_round}_{lng_round}_{mag_round}_{time_window}"
+
+
+# def fetch_usgs_events():
+#     """Consulta el feed GeoJSON de la USGS midiendo tiempos de respuesta."""
+#     start_time = time.time()
+#     timestamp_param = int(time.time())
+#     usgs_url = f"https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson?t={timestamp_param}"
+#     headers = {
+#         "User-Agent": "EpicentroMonitor/2.0 (Android Earthquake Alert System)",
+#         "Accept": "application/json",
+#         "Cache-Control": "no-cache, no-store, must-revalidate",
+#         "Pragma": "no-cache",
+#     }
+    
+#     events = []
+#     try:
+#         response = http_session.get(usgs_url, headers=headers, timeout=8)
+#         elapsed_ms = round((time.time() - start_time) * 1000, 2)
+
+#         if response.status_code == 200:
+#             data = response.json()
+#             features = data.get("features", [])
+            
+#             for feat in features:
+#                 props = feat.get("properties", {})
+#                 geom = feat.get("geometry", {})
+#                 coords = geom.get("coordinates", [0, 0, 0])
+                
+#                 events.append({
+#                     "id": feat.get("id"),
+#                     "source": "USGS",
+#                     "magnitude": props.get("mag"),
+#                     "place": props.get("place", "Ubicación no especificada"),
+#                     "lat": float(coords[1]),
+#                     "lng": float(coords[0]),
+#                     "depth": float(coords[2]),
+#                     "timestamp_ms": props.get("time", 0),
+#                     "url": props.get("url", "")
+#                 })
+
+#             logging.info(f"🔍 [USGS] Petición exitosa en {elapsed_ms} ms. Eventos recibidos: {len(events)}")
+#         else:
+#             logging.warning(f"⚠️ [USGS] API devolvió código HTTP {response.status_code} ({elapsed_ms} ms)")
+#     except Exception as e:
+#         elapsed_ms = round((time.time() - start_time) * 1000, 2)
+#         logging.error(f"❌ [USGS] Error consultando API ({elapsed_ms} ms): {e}")
+        
+#     return events
+
+
+# def fetch_emsc_events():
+#     """Consulta la API de EMSC midiendo tiempos de respuesta."""
+#     start_time = time.time()
+#     emsc_url = "https://www.seismicportal.eu/fdsnws/event/1/query?format=json&limit=30"
+#     headers = {
+#         "User-Agent": "EpicentroMonitor/2.0 (Android Earthquake Alert System)",
+#         "Accept": "application/json",
+#     }
+    
+#     events = []
+#     try:
+#         response = http_session.get(emsc_url, headers=headers, timeout=8)
+#         elapsed_ms = round((time.time() - start_time) * 1000, 2)
+
+#         if response.status_code == 200:
+#             data = response.json()
+#             features = data.get("features", [])
+            
+#             for feat in features:
+#                 props = feat.get("properties", {})
+#                 geom = feat.get("geometry", {})
+#                 coords = geom.get("coordinates", [0, 0, 0])
+                
+#                 time_str = props.get("time")
+#                 timestamp_ms = 0
+#                 if time_str:
+#                     dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+#                     timestamp_ms = int(dt.timestamp() * 1000)
+
+#                 raw_unid = feat.get("id") or props.get("unid")
+#                 event_url = props.get("url") or f"https://www.seismicportal.eu/eventdetails.html?unid={raw_unid}"
+
+#                 events.append({
+#                     "id": f"emsc_{raw_unid}",
+#                     "source": "EMSC",
+#                     "magnitude": props.get("mag"),
+#                     "place": props.get("flynn_region", "Ubicación no especificada"),
+#                     "lat": float(coords[1]),
+#                     "lng": float(coords[0]),
+#                     "depth": float(coords[2]),
+#                     "timestamp_ms": timestamp_ms,
+#                     "url": event_url
+#                 })
+
+#             logging.info(f"🔍 [EMSC] Petición exitosa en {elapsed_ms} ms. Eventos recibidos: {len(events)}")
+#         else:
+#             logging.warning(f"⚠️ [EMSC] API devolvió código HTTP {response.status_code} ({elapsed_ms} ms)")
+#     except Exception as e:
+#         elapsed_ms = round((time.time() - start_time) * 1000, 2)
+#         logging.error(f"❌ [EMSC] Error consultando API ({elapsed_ms} ms): {e}")
+
+#     return events
+
+
+# def process_and_notify_event(sismo, access_token, fingerprint):
+#     """Procesa un sismo individual, arma el payload y lo envía a Firebase Cloud Messaging."""
+#     event_id = sismo["id"]
+#     timestamp_ms = sismo["timestamp_ms"]
+#     now_ms = datetime.now(timezone.utc).timestamp() * 1000
+#     max_age_ms = 60 * 60 * 1000  # 60 minutos de margen máximo
+#     delay_minutes = round((now_ms - timestamp_ms) / 60000, 1)
+
+#     if (now_ms - timestamp_ms) > max_age_ms:
+#         logging.debug(f"ℹ️ Evento {event_id} [{sismo['source']}] descartado por antigüedad ({delay_minutes} min).")
+#         return
+
+#     raw_mag = sismo["magnitude"]
+#     mag = f"{float(raw_mag):.1f}" if raw_mag is not None else "N/A"
+
+#     place = sismo["place"]
+#     float_lat = sismo["lat"]
+#     float_lng = sismo["lng"]
+#     float_depth = sismo["depth"]
+
+#     depth_str = f"{float_depth:.1f} km"
+#     lng_str = str(float_lng)
+#     lat_str = str(float_lat)
+#     event_url = sismo["url"]
+#     source = sismo["source"]
+
+#     sismo_time = format_local_time(timestamp_ms, float_lat, float_lng)
+
+#     logging.info(
+#         f"🚨 ¡NUEVO SISMO DETECTADO! Evento: {event_id} [{source}] | M{mag} - {place} "
+#         f"| Hora: {sismo_time} | Profundidad: {depth_str} | Retraso {source}: {delay_minutes} min"
+#     )
+
+#     map_url = get_static_map_url(lat_str, lng_str)
+#     fcm_url = f"https://fcm.googleapis.com/v1/projects/{PROJECT_ID}/messages:send"
+
+#     payload = {
+#         "message": {
+#             "topic": "sismos_alertas",
+#             "data": {
+#                 "eventId": str(event_id),
+#                 "title": f"⚠️ ¡ALERTA DE SISMO M {mag}!",
+#                 "magnitude": str(mag),
+#                 "message": f"Ubicación: {place}",
+#                 "latitude": lat_str,
+#                 "longitude": lng_str,
+#                 "imageUrl": map_url,
+#                 "time": sismo_time,
+#                 "depth": depth_str,
+#                 "eventUrl": event_url,
+#             },
+#             "android": {
+#                 "priority": "HIGH",
+#                 "direct_boot_ok": True,
+#                 "ttl": "60s"
+#             },
+#         }
+#     }
+
+#     headers_fcm = {
+#         "Authorization": f"Bearer {access_token}",
+#         "Content-Type": "application/json",
+#     }
+
+#     fcm_start_time = time.time()
+#     res = http_session.post(fcm_url, headers=headers_fcm, data=json.dumps(payload), timeout=8)
+#     fcm_elapsed_ms = round((time.time() - fcm_start_time) * 1000, 2)
+
+#     if res.status_code == 200:
+#         logging.info(f"✅ Notificación enviada con éxito a FCM para el sismo {event_id} ({fcm_elapsed_ms} ms)")
+#         PROCESSED_EVENTS.add(event_id)
+#         PROCESSED_FINGERPRINTS.add(fingerprint)
+#     else:
+#         logging.error(f"❌ Error al enviar notificación a FCM ({res.status_code}) [{fcm_elapsed_ms} ms]: {res.text}")
+
+#     if len(PROCESSED_EVENTS) > MAX_CACHE_SIZE:
+#         PROCESSED_EVENTS.pop()
+#     if len(PROCESSED_FINGERPRINTS) > MAX_CACHE_SIZE:
+#         PROCESSED_FINGERPRINTS.pop()
+
+
+# def check_earthquakes_and_notify():
+#     """Rutina principal: obtiene datos de ambas fuentes y maneja reseteos de sockets HTTP."""
+#     global http_session
+#     cycle_start = time.time()
+#     try:
+#         usgs_events = fetch_usgs_events()
+#         emsc_events = fetch_emsc_events()
+        
+#         all_events = usgs_events + emsc_events
+#         if not all_events:
+#             return
+
+#         access_token = None
+
+#         for sismo in all_events:
+#             event_id = sismo.get("id")
+#             fingerprint = generate_event_fingerprint(
+#                 sismo["lat"], sismo["lng"], sismo["magnitude"], sismo["timestamp_ms"]
+#             )
+
+#             # 🛡️ Si el ID o la Huella Geográfica ya se procesaron, descartamos
+#             if not event_id or event_id in PROCESSED_EVENTS or fingerprint in PROCESSED_FINGERPRINTS:
+#                 continue
+
+#             if not access_token:
+#                 access_token = get_fcm_access_token()
+
+#             process_and_notify_event(sismo, access_token, fingerprint)
+
+#         total_elapsed = round((time.time() - cycle_start) * 1000, 2)
+#         logging.info(f"⏱️ Ciclo de monitoreo completado en {total_elapsed} ms. Total procesados: {len(all_events)}")
+
+#     except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
+#         total_elapsed = round((time.time() - cycle_start) * 1000, 2)
+#         logging.warning(f"⚠️ Conexión reseteada por el servidor ({total_elapsed} ms). Recreando sesión HTTP...")
+#         http_session = create_http_session()
+#     except Exception as e:
+#         total_elapsed = round((time.time() - cycle_start) * 1000, 2)
+#         logging.error(f"❌ Error inesperado en rutina de sismos ({total_elapsed} ms): {e}", exc_info=True)
+
+
+# def worker_loop():
+#     """Bucle del worker ejecutándose continuamente cada 15 segundos."""
+#     logging.info("🚀 Worker de Monitoreo Sísmico activo. Consultando USGS + EMSC en paralelo...")
+#     while True:
+#         try:
+#             check_earthquakes_and_notify()
+#         except Exception as e:
+#             logging.error(f"❌ Error en bucle del worker: {e}")
+#         time.sleep(15)
+
+
+# # Iniciar el Worker en un hilo paralelo a Flask
+# threading.Thread(target=worker_loop, daemon=True).start()
+
+# if __name__ == "__main__":
+#     port = int(os.environ.get("PORT", 10000))
+#     app.run(host="0.0.0.0", port=port)
+# import json
+# import logging
+# import os
+# import threading
+# import time
+# from datetime import datetime, timezone
+# from zoneinfo import ZoneInfo
+# from timezonefinder import TimezoneFinder
+
+# import google.auth
+# from google.auth.transport.requests import Request
+# from google.oauth2 import service_account
+# from flask import Flask, jsonify
+# import requests
+# from requests.adapters import HTTPAdapter
+# from urllib3.util.retry import Retry
+
+# # Configuración detallada de logs para monitoreo en tiempo real
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format="%(asctime)s [%(levelname)s] %(message)s",
+#     datefmt="%Y-%m-%d %H:%M:%S",
+# )
+
+# app = Flask(__name__)
+
+# # Configuración del proyecto Firebase y APIs externas
+# PROJECT_ID = "epicentro-66146"
+# GEOAPIFY_KEY = "3fad5afd6cf6486192be6561c4e7462a"
+
+# # Caché en memoria de IDs procesados por fuente para evitar reenvíos infinitos
+# PROCESSED_EVENTS = set()
+# MAX_CACHE_SIZE = 2000
+
+# # Caché global para el token OAuth2 de FCM
+# fcm_credentials = None
+
+# # Inicializador de zona horaria por coordenadas GPS
+# tf = TimezoneFinder()
+
+# # Configuración del adaptador de reintentos para manejar sockets caídos
+# retries = Retry(
+#     total=3,
+#     backoff_factor=0.3,
+#     status_forcelist=[500, 502, 503, 504],
+#     raise_on_status=False,
+# )
+# adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+
+
+# def create_http_session():
+#     """Crea una sesión HTTP optimizada con reintentos para evitar ConnectionResetError."""
+#     session = requests.Session()
+#     session.mount("https://", adapter)
+#     session.mount("http://", adapter)
+#     return session
+
+
+# # Sesión HTTP reutilizable global
+# http_session = create_http_session()
+
+
+# @app.route("/")
+# def health_check():
+#     """Endpoint de verificación de estado y métricas del worker."""
+#     return jsonify({
+#         "status": "online",
+#         "service": "Epicentro Realtime Seismic Worker",
+#         "processed_events_count": len(PROCESSED_EVENTS),
+#         "timestamp": datetime.now(timezone.utc).isoformat()
+#     }), 200
+
+
+# def get_fcm_access_token():
+#     """Obtiene o refresca de forma eficiente el Bearer Token OAuth 2.0 para FCM v1."""
+#     global fcm_credentials
+
+#     if not fcm_credentials:
+#         service_account_env = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
+#         if not service_account_env:
+#             logging.error("❌ CRÍTICO: La variable FIREBASE_SERVICE_ACCOUNT no está configurada.")
+#             raise ValueError("❌ Falta la variable de entorno FIREBASE_SERVICE_ACCOUNT")
+
+#         service_account_info = json.loads(service_account_env)
+#         fcm_credentials = service_account.Credentials.from_service_account_info(
+#             service_account_info,
+#             scopes=["https://www.googleapis.com/auth/firebase.messaging"],
+#         )
+
+#     if not fcm_credentials.valid:
+#         fcm_credentials.refresh(Request())
+
+#     return fcm_credentials.token
+
+
+# def get_static_map_url(lat, lng):
+#     """Construye la URL para obtener el mapa estático en Geoapify."""
+#     return (
+#         f"https://maps.geoapify.com/v1/staticmap"
+#         f"?style=osm-bright&width=600&height=300"
+#         f"&center=lonlat:{lng},{lat}&zoom=7"
+#         f"&marker=lonlat:{lng},{lat};color:%23ff0000;size:medium"
+#         f"&apiKey={GEOAPIFY_KEY}"
+#     )
+
+
+# def format_local_time(timestamp_ms, lat, lng):
+#     """Calcula y formatea la hora exacta del evento según la zona horaria de las coordenadas."""
+#     utc_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+#     try:
+#         tz_name = tf.timezone_at(lat=lat, lng=lng)
+#         if tz_name:
+#             local_dt = utc_dt.astimezone(ZoneInfo(tz_name))
+#             return local_dt.strftime("%H:%M HS (Local)")
+#     except Exception as e:
+#         logging.warning(f"⚠️ No se pudo determinar huso horario local para ({lat}, {lng}): {e}")
+    
+#     return utc_dt.strftime("%H:%M UTC")
+
+
+# def fetch_usgs_events():
+#     """Consulta el feed GeoJSON de la USGS midiendo tiempos de respuesta."""
+#     start_time = time.time()
+#     timestamp_param = int(time.time())
+#     usgs_url = f"https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson?t={timestamp_param}"
+#     headers = {
+#         "User-Agent": "EpicentroMonitor/2.0 (Android Earthquake Alert System)",
+#         "Accept": "application/json",
+#         "Cache-Control": "no-cache, no-store, must-revalidate",
+#         "Pragma": "no-cache",
+#     }
+    
+#     events = []
+#     try:
+#         response = http_session.get(usgs_url, headers=headers, timeout=8)
+#         elapsed_ms = round((time.time() - start_time) * 1000, 2)
+
+#         if response.status_code == 200:
+#             data = response.json()
+#             features = data.get("features", [])
+            
+#             for feat in features:
+#                 props = feat.get("properties", {})
+#                 geom = feat.get("geometry", {})
+#                 coords = geom.get("coordinates", [0, 0, 0])
+                
+#                 events.append({
+#                     "id": f"usgs_{feat.get('id')}",
+#                     "source": "USGS",
+#                     "magnitude": props.get("mag"),
+#                     "place": props.get("place", "Ubicación no especificada"),
+#                     "lat": float(coords[1]),
+#                     "lng": float(coords[0]),
+#                     "depth": float(coords[2]),
+#                     "timestamp_ms": props.get("time", 0),
+#                     "url": props.get("url", "")
+#                 })
+
+#             logging.info(f"🔍 [USGS] Petición exitosa en {elapsed_ms} ms. Eventos recibidos: {len(events)}")
+#         else:
+#             logging.warning(f"⚠️ [USGS] API devolvió código HTTP {response.status_code} ({elapsed_ms} ms)")
+#     except Exception as e:
+#         elapsed_ms = round((time.time() - start_time) * 1000, 2)
+#         logging.error(f"❌ [USGS] Error consultando API ({elapsed_ms} ms): {e}")
+        
+#     return events
+
+
+# def fetch_emsc_events():
+#     """Consulta la API de EMSC midiendo tiempos de respuesta."""
+#     start_time = time.time()
+#     emsc_url = "https://www.seismicportal.eu/fdsnws/event/1/query?format=json&limit=30"
+#     headers = {
+#         "User-Agent": "EpicentroMonitor/2.0 (Android Earthquake Alert System)",
+#         "Accept": "application/json",
+#     }
+    
+#     events = []
+#     try:
+#         response = http_session.get(emsc_url, headers=headers, timeout=8)
+#         elapsed_ms = round((time.time() - start_time) * 1000, 2)
+
+#         if response.status_code == 200:
+#             data = response.json()
+#             features = data.get("features", [])
+            
+#             for feat in features:
+#                 props = feat.get("properties", {})
+#                 geom = feat.get("geometry", {})
+#                 coords = geom.get("coordinates", [0, 0, 0])
+                
+#                 time_str = props.get("time")
+#                 timestamp_ms = 0
+#                 if time_str:
+#                     dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+#                     timestamp_ms = int(dt.timestamp() * 1000)
+
+#                 raw_unid = feat.get("id") or props.get("unid")
+#                 event_url = props.get("url") or f"https://www.seismicportal.eu/eventdetails.html?unid={raw_unid}"
+
+#                 events.append({
+#                     "id": f"emsc_{raw_unid}",
+#                     "source": "EMSC",
+#                     "magnitude": props.get("mag"),
+#                     "place": props.get("flynn_region", "Ubicación no especificada"),
+#                     "lat": float(coords[1]),
+#                     "lng": float(coords[0]),
+#                     "depth": float(coords[2]),
+#                     "timestamp_ms": timestamp_ms,
+#                     "url": event_url
+#                 })
+
+#             logging.info(f"🔍 [EMSC] Petición exitosa en {elapsed_ms} ms. Eventos recibidos: {len(events)}")
+#         else:
+#             logging.warning(f"⚠️ [EMSC] API devolvió código HTTP {response.status_code} ({elapsed_ms} ms)")
+#     except Exception as e:
+#         elapsed_ms = round((time.time() - start_time) * 1000, 2)
+#         logging.error(f"❌ [EMSC] Error consultando API ({elapsed_ms} ms): {e}")
+
+#     return events
+
+
+# def process_and_notify_event(sismo, access_token):
+#     """Procesa un sismo individual, arma el payload y lo envía a Firebase Cloud Messaging."""
+#     event_id = sismo["id"]
+#     timestamp_ms = sismo["timestamp_ms"]
+#     now_ms = datetime.now(timezone.utc).timestamp() * 1000
+#     max_age_ms = 60 * 60 * 1000  # 60 minutos de margen máximo
+#     delay_minutes = round((now_ms - timestamp_ms) / 60000, 1)
+
+#     if (now_ms - timestamp_ms) > max_age_ms:
+#         logging.debug(f"ℹ️ Evento {event_id} [{sismo['source']}] descartado por antigüedad ({delay_minutes} min).")
+#         return
+
+#     raw_mag = sismo["magnitude"]
+#     mag = f"{float(raw_mag):.1f}" if raw_mag is not None else "N/A"
+
+#     place = sismo["place"]
+#     float_lat = sismo["lat"]
+#     float_lng = sismo["lng"]
+#     float_depth = sismo["depth"]
+
+#     depth_str = f"{float_depth:.1f} km"
+#     lng_str = str(float_lng)
+#     lat_str = str(float_lat)
+#     event_url = sismo["url"]
+#     source = sismo["source"]
+
+#     sismo_time = format_local_time(timestamp_ms, float_lat, float_lng)
+
+#     logging.info(
+#         f"🚨 ¡NUEVO SISMO DETECTADO! Evento: {event_id} [{source}] | M{mag} - {place} "
+#         f"| Hora: {sismo_time} | Profundidad: {depth_str} | Retraso {source}: {delay_minutes} min"
+#     )
+
+#     map_url = get_static_map_url(lat_str, lng_str)
+#     fcm_url = f"https://fcm.googleapis.com/v1/projects/{PROJECT_ID}/messages:send"
+
+#     payload = {
+#         "message": {
+#             "topic": "sismos_alertas",
+#             "data": {
+#                 "eventId": str(event_id),
+#                 "source": str(source),
+#                 "title": f"⚠️ ¡ALERTA DE SISMO M {mag}! ({source})",
+#                 "magnitude": str(mag),
+#                 "message": f"Ubicación: {place}",
+#                 "latitude": lat_str,
+#                 "longitude": lng_str,
+#                 "imageUrl": map_url,
+#                 "time": sismo_time,
+#                 "depth": depth_str,
+#                 "eventUrl": event_url,
+#             },
+#             "android": {
+#                 "priority": "HIGH",
+#                 "direct_boot_ok": True,
+#                 "ttl": "60s"
+#             },
+#         }
+#     }
+
+#     headers_fcm = {
+#         "Authorization": f"Bearer {access_token}",
+#         "Content-Type": "application/json",
+#     }
+
+#     fcm_start_time = time.time()
+#     res = http_session.post(fcm_url, headers=headers_fcm, data=json.dumps(payload), timeout=8)
+#     fcm_elapsed_ms = round((time.time() - fcm_start_time) * 1000, 2)
+
+#     if res.status_code == 200:
+#         logging.info(f"✅ Notificación enviada con éxito a FCM para el sismo {event_id} ({fcm_elapsed_ms} ms)")
+#         PROCESSED_EVENTS.add(event_id)
+#     else:
+#         logging.error(f"❌ Error al enviar notificación a FCM ({res.status_code}) [{fcm_elapsed_ms} ms]: {res.text}")
+
+#     if len(PROCESSED_EVENTS) > MAX_CACHE_SIZE:
+#         PROCESSED_EVENTS.pop()
+
+
+# def check_earthquakes_and_notify():
+#     """Rutina principal: obtiene datos de ambas fuentes y maneja reseteos de sockets HTTP."""
+#     global http_session
+#     cycle_start = time.time()
+#     try:
+#         usgs_events = fetch_usgs_events()
+#         emsc_events = fetch_emsc_events()
+        
+#         all_events = usgs_events + emsc_events
+#         if not all_events:
+#             return
+
+#         access_token = None
+
+#         for sismo in all_events:
+#             event_id = sismo.get("id")
+
+#             # 🛡️ Solo se descarta si la MISMA FUENTE ya envió este MISMO ID
+#             # Esto permite que si USGS y EMSC mandan el mismo sismo, lleguen AMBAS alertas a la app
+#             if not event_id or event_id in PROCESSED_EVENTS:
+#                 continue
+
+#             if not access_token:
+#                 access_token = get_fcm_access_token()
+
+#             process_and_notify_event(sismo, access_token)
+
+#         total_elapsed = round((time.time() - cycle_start) * 1000, 2)
+#         logging.info(f"⏱️ Ciclo de monitoreo completado en {total_elapsed} ms. Total procesados: {len(all_events)}")
+
+#     except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
+#         total_elapsed = round((time.time() - cycle_start) * 1000, 2)
+#         logging.warning(f"⚠️ Conexión reseteada por el servidor ({total_elapsed} ms). Recreando sesión HTTP...")
+#         http_session = create_http_session()
+#     except Exception as e:
+#         total_elapsed = round((time.time() - cycle_start) * 1000, 2)
+#         logging.error(f"❌ Error inesperado en rutina de sismos ({total_elapsed} ms): {e}", exc_info=True)
+
+
+# def worker_loop():
+#     """Bucle del worker ejecutándose continuamente cada 15 segundos."""
+#     logging.info("🚀 Worker de Monitoreo Sísmico activo. Consultando USGS + EMSC en paralelo...")
+#     while True:
+#         try:
+#             check_earthquakes_and_notify()
+#         except Exception as e:
+#             logging.error(f"❌ Error en bucle del worker: {e}")
+#         time.sleep(15)
+
+
+# # Iniciar el Worker en un hilo paralelo a Flask
+# threading.Thread(target=worker_loop, daemon=True).start()
+
+# if __name__ == "__main__":
+#     port = int(os.environ.get("PORT", 10000))
+#     app.run(host="0.0.0.0", port=port)
 import json
 import logging
 import os
@@ -371,7 +1103,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Configuración detallada de logs para monitoreo en tiempo real
+# Configuración detallada de logs
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -380,22 +1112,17 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
-# Configuración del proyecto Firebase y APIs externas
+# Configuración Firebase y APIs
 PROJECT_ID = "epicentro-66146"
 GEOAPIFY_KEY = "3fad5afd6cf6486192be6561c4e7462a"
 
-# Caché en memoria de IDs y Fingerprints procesados para evitar duplicados
 PROCESSED_EVENTS = set()
-PROCESSED_FINGERPRINTS = set()
-MAX_CACHE_SIZE = 2000
+MAX_CACHE_SIZE = 3000
 
-# Caché global para el token OAuth2 de FCM
 fcm_credentials = None
-
-# Inicializador de zona horaria por coordenadas GPS
 tf = TimezoneFinder()
 
-# Configuración del adaptador de reintentos para manejar sockets caídos
+# Adaptador de reintentos HTTP
 retries = Retry(
     total=3,
     backoff_factor=0.3,
@@ -406,31 +1133,26 @@ adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
 
 
 def create_http_session():
-    """Crea una sesión HTTP optimizada con reintentos para evitar ConnectionResetError."""
     session = requests.Session()
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
 
 
-# Sesión HTTP reutilizable global
 http_session = create_http_session()
 
 
 @app.route("/")
 def health_check():
-    """Endpoint de verificación de estado y métricas del worker."""
     return jsonify({
         "status": "online",
-        "service": "Epicentro Realtime Seismic Worker",
+        "service": "Epicentro Realtime Seismic Worker (Global M2.5+)",
         "processed_events_count": len(PROCESSED_EVENTS),
-        "processed_fingerprints_count": len(PROCESSED_FINGERPRINTS),
         "timestamp": datetime.now(timezone.utc).isoformat()
     }), 200
 
 
 def get_fcm_access_token():
-    """Obtiene o refresca de forma eficiente el Bearer Token OAuth 2.0 para FCM v1."""
     global fcm_credentials
 
     if not fcm_credentials:
@@ -452,7 +1174,6 @@ def get_fcm_access_token():
 
 
 def get_static_map_url(lat, lng):
-    """Construye la URL para obtener el mapa estático en Geoapify."""
     return (
         f"https://maps.geoapify.com/v1/staticmap"
         f"?style=osm-bright&width=600&height=300"
@@ -463,7 +1184,6 @@ def get_static_map_url(lat, lng):
 
 
 def format_local_time(timestamp_ms, lat, lng):
-    """Calcula y formatea la hora exacta del evento según la zona horaria de las coordenadas."""
     utc_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
     try:
         tz_name = tf.timezone_at(lat=lat, lng=lng)
@@ -471,27 +1191,16 @@ def format_local_time(timestamp_ms, lat, lng):
             local_dt = utc_dt.astimezone(ZoneInfo(tz_name))
             return local_dt.strftime("%H:%M HS (Local)")
     except Exception as e:
-        logging.warning(f"⚠️ No se pudo determinar huso horario local para ({lat}, {lng}): {e}")
+        logging.warning(f"⚠️ No se pudo determinar huso horario para ({lat}, {lng}): {e}")
     
     return utc_dt.strftime("%H:%M UTC")
 
 
-def generate_event_fingerprint(lat, lng, mag, timestamp_ms):
-    """
-    Genera una huella digital espacial y temporal para detectar el mismo sismo 
-    procedente de distintas fuentes (ej. USGS y EMSC).
-    """
-    lat_round = round(float(lat), 1)
-    lng_round = round(float(lng), 1)
-    mag_round = round(float(mag), 1) if mag is not None else 0.0
-    time_window = timestamp_ms // (15 * 60 * 1000)  # Ventana de 15 minutos
-    return f"{lat_round}_{lng_round}_{mag_round}_{time_window}"
-
-
 def fetch_usgs_events():
-    """Consulta el feed GeoJSON de la USGS midiendo tiempos de respuesta."""
+    """Consulta sismos de USGS de la última hora."""
     start_time = time.time()
     timestamp_param = int(time.time())
+    # 🟢 Se consulta el resumen completo de la última hora
     usgs_url = f"https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson?t={timestamp_param}"
     headers = {
         "User-Agent": "EpicentroMonitor/2.0 (Android Earthquake Alert System)",
@@ -514,10 +1223,15 @@ def fetch_usgs_events():
                 geom = feat.get("geometry", {})
                 coords = geom.get("coordinates", [0, 0, 0])
                 
+                mag = props.get("mag")
+                # 🟢 Filtro directo en extracción: Magnitud >= 2.5
+                if mag is None or float(mag) < 2.5:
+                    continue
+
                 events.append({
-                    "id": feat.get("id"),
+                    "id": f"usgs_{feat.get('id')}",
                     "source": "USGS",
-                    "magnitude": props.get("mag"),
+                    "magnitude": float(mag),
                     "place": props.get("place", "Ubicación no especificada"),
                     "lat": float(coords[1]),
                     "lng": float(coords[0]),
@@ -526,9 +1240,9 @@ def fetch_usgs_events():
                     "url": props.get("url", "")
                 })
 
-            logging.info(f"🔍 [USGS] Petición exitosa en {elapsed_ms} ms. Eventos recibidos: {len(events)}")
+            logging.info(f"🔍 [USGS] Petición exitosa en {elapsed_ms} ms. Eventos M2.5+: {len(events)}")
         else:
-            logging.warning(f"⚠️ [USGS] API devolvió código HTTP {response.status_code} ({elapsed_ms} ms)")
+            logging.warning(f"⚠️ [USGS] Código HTTP {response.status_code} ({elapsed_ms} ms)")
     except Exception as e:
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
         logging.error(f"❌ [USGS] Error consultando API ({elapsed_ms} ms): {e}")
@@ -537,9 +1251,10 @@ def fetch_usgs_events():
 
 
 def fetch_emsc_events():
-    """Consulta la API de EMSC midiendo tiempos de respuesta."""
+    """Consulta sismos de EMSC en tiempo real filtrados a minmag=2.5 y limit=100."""
     start_time = time.time()
-    emsc_url = "https://www.seismicportal.eu/fdsnws/event/1/query?format=json&limit=30"
+    # 🟢 CAMBIO CLAVE: Agregado minmag=2.5 y aumentado limit a 100 para no perder sismos globales
+    emsc_url = "https://www.seismicportal.eu/fdsnws/event/1/query?format=json&minmag=2.5&limit=100"
     headers = {
         "User-Agent": "EpicentroMonitor/2.0 (Android Earthquake Alert System)",
         "Accept": "application/json",
@@ -559,6 +1274,10 @@ def fetch_emsc_events():
                 geom = feat.get("geometry", {})
                 coords = geom.get("coordinates", [0, 0, 0])
                 
+                mag = props.get("mag")
+                if mag is None or float(mag) < 2.5:
+                    continue
+
                 time_str = props.get("time")
                 timestamp_ms = 0
                 if time_str:
@@ -571,7 +1290,7 @@ def fetch_emsc_events():
                 events.append({
                     "id": f"emsc_{raw_unid}",
                     "source": "EMSC",
-                    "magnitude": props.get("mag"),
+                    "magnitude": float(mag),
                     "place": props.get("flynn_region", "Ubicación no especificada"),
                     "lat": float(coords[1]),
                     "lng": float(coords[0]),
@@ -580,9 +1299,9 @@ def fetch_emsc_events():
                     "url": event_url
                 })
 
-            logging.info(f"🔍 [EMSC] Petición exitosa en {elapsed_ms} ms. Eventos recibidos: {len(events)}")
+            logging.info(f"🔍 [EMSC] Petición exitosa en {elapsed_ms} ms. Eventos M2.5+: {len(events)}")
         else:
-            logging.warning(f"⚠️ [EMSC] API devolvió código HTTP {response.status_code} ({elapsed_ms} ms)")
+            logging.warning(f"⚠️ [EMSC] Código HTTP {response.status_code} ({elapsed_ms} ms)")
     except Exception as e:
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
         logging.error(f"❌ [EMSC] Error consultando API ({elapsed_ms} ms): {e}")
@@ -590,20 +1309,18 @@ def fetch_emsc_events():
     return events
 
 
-def process_and_notify_event(sismo, access_token, fingerprint):
-    """Procesa un sismo individual, arma el payload y lo envía a Firebase Cloud Messaging."""
+def process_and_notify_event(sismo, access_token):
     event_id = sismo["id"]
     timestamp_ms = sismo["timestamp_ms"]
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
-    max_age_ms = 60 * 60 * 1000  # 60 minutos de margen máximo
+    max_age_ms = 60 * 60 * 1000  # 60 minutos máximo de antigüedad
     delay_minutes = round((now_ms - timestamp_ms) / 60000, 1)
 
     if (now_ms - timestamp_ms) > max_age_ms:
-        logging.debug(f"ℹ️ Evento {event_id} [{sismo['source']}] descartado por antigüedad ({delay_minutes} min).")
         return
 
-    raw_mag = sismo["magnitude"]
-    mag = f"{float(raw_mag):.1f}" if raw_mag is not None else "N/A"
+    mag_val = sismo["magnitude"]
+    mag = f"{mag_val:.1f}"
 
     place = sismo["place"]
     float_lat = sismo["lat"]
@@ -619,8 +1336,8 @@ def process_and_notify_event(sismo, access_token, fingerprint):
     sismo_time = format_local_time(timestamp_ms, float_lat, float_lng)
 
     logging.info(
-        f"🚨 ¡NUEVO SISMO DETECTADO! Evento: {event_id} [{source}] | M{mag} - {place} "
-        f"| Hora: {sismo_time} | Profundidad: {depth_str} | Retraso {source}: {delay_minutes} min"
+        f"🚨 ¡NUEVO SISMO M{mag}! ID: {event_id} [{source}] | {place} "
+        f"| Hora: {sismo_time} | Profundidad: {depth_str}"
     )
 
     map_url = get_static_map_url(lat_str, lng_str)
@@ -631,7 +1348,8 @@ def process_and_notify_event(sismo, access_token, fingerprint):
             "topic": "sismos_alertas",
             "data": {
                 "eventId": str(event_id),
-                "title": f"⚠️ ¡ALERTA DE SISMO M {mag}!",
+                "source": str(source),
+                "title": f"⚠️ ¡ALERTA DE SISMO M {mag}! ({source})",
                 "magnitude": str(mag),
                 "message": f"Ubicación: {place}",
                 "latitude": lat_str,
@@ -659,20 +1377,16 @@ def process_and_notify_event(sismo, access_token, fingerprint):
     fcm_elapsed_ms = round((time.time() - fcm_start_time) * 1000, 2)
 
     if res.status_code == 200:
-        logging.info(f"✅ Notificación enviada con éxito a FCM para el sismo {event_id} ({fcm_elapsed_ms} ms)")
+        logging.info(f"✅ FCM Notificado: {event_id} ({fcm_elapsed_ms} ms)")
         PROCESSED_EVENTS.add(event_id)
-        PROCESSED_FINGERPRINTS.add(fingerprint)
     else:
-        logging.error(f"❌ Error al enviar notificación a FCM ({res.status_code}) [{fcm_elapsed_ms} ms]: {res.text}")
+        logging.error(f"❌ Error enviando FCM ({res.status_code}) [{fcm_elapsed_ms} ms]: {res.text}")
 
     if len(PROCESSED_EVENTS) > MAX_CACHE_SIZE:
         PROCESSED_EVENTS.pop()
-    if len(PROCESSED_FINGERPRINTS) > MAX_CACHE_SIZE:
-        PROCESSED_FINGERPRINTS.pop()
 
 
 def check_earthquakes_and_notify():
-    """Rutina principal: obtiene datos de ambas fuentes y maneja reseteos de sockets HTTP."""
     global http_session
     cycle_start = time.time()
     try:
@@ -687,43 +1401,35 @@ def check_earthquakes_and_notify():
 
         for sismo in all_events:
             event_id = sismo.get("id")
-            fingerprint = generate_event_fingerprint(
-                sismo["lat"], sismo["lng"], sismo["magnitude"], sismo["timestamp_ms"]
-            )
 
-            # 🛡️ Si el ID o la Huella Geográfica ya se procesaron, descartamos
-            if not event_id or event_id in PROCESSED_EVENTS or fingerprint in PROCESSED_FINGERPRINTS:
+            if not event_id or event_id in PROCESSED_EVENTS:
                 continue
 
             if not access_token:
                 access_token = get_fcm_access_token()
 
-            process_and_notify_event(sismo, access_token, fingerprint)
+            process_and_notify_event(sismo, access_token)
 
         total_elapsed = round((time.time() - cycle_start) * 1000, 2)
-        logging.info(f"⏱️ Ciclo de monitoreo completado en {total_elapsed} ms. Total procesados: {len(all_events)}")
+        logging.info(f"⏱️ Monitoreo completado en {total_elapsed} ms.")
 
     except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError) as e:
-        total_elapsed = round((time.time() - cycle_start) * 1000, 2)
-        logging.warning(f"⚠️ Conexión reseteada por el servidor ({total_elapsed} ms). Recreando sesión HTTP...")
+        logging.warning("⚠️ Conexión reseteada. Recreando sesión HTTP...")
         http_session = create_http_session()
     except Exception as e:
-        total_elapsed = round((time.time() - cycle_start) * 1000, 2)
-        logging.error(f"❌ Error inesperado en rutina de sismos ({total_elapsed} ms): {e}", exc_info=True)
+        logging.error(f"❌ Error en rutina: {e}", exc_info=True)
 
 
 def worker_loop():
-    """Bucle del worker ejecutándose continuamente cada 15 segundos."""
-    logging.info("🚀 Worker de Monitoreo Sísmico activo. Consultando USGS + EMSC en paralelo...")
+    logging.info("🚀 Worker Global M2.5+ activo. Frecuencia de chequeo: 15 segundos.")
     while True:
         try:
             check_earthquakes_and_notify()
         except Exception as e:
             logging.error(f"❌ Error en bucle del worker: {e}")
-        time.sleep(15)
+        time.sleep(15)  # 🟢 15 segundos es ideal para no saturar apis y mantener tiempo real
 
 
-# Iniciar el Worker en un hilo paralelo a Flask
 threading.Thread(target=worker_loop, daemon=True).start()
 
 if __name__ == "__main__":
