@@ -1349,7 +1349,7 @@ def process_and_notify_event(sismo, access_token):
             "data": {
                 "eventId": str(event_id),
                 "source": str(source),
-                "title": f"⚠️ ¡ALERTA DE SISMO M {mag}! ({source})",
+                "title": f"¡ALERTA DE SISMO M {mag}! ({source})",
                 "magnitude": str(mag),
                 "message": f"Ubicación: {place}",
                 "latitude": lat_str,
