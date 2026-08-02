@@ -1,5 +1,7 @@
 flask
 gunicorn
 requests
+urllib3
 google-auth
 timezonefinder
+beautifulsoup4
