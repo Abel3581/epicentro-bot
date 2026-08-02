@@ -630,7 +630,7 @@ def fetch_emsc_events():
 
 
 def fetch_funvisis_events():
-    """Consulta y parsea los sismos de FUNVISIS desde su endpoint JSON maravilla.json."""
+    """Consulta y parsea los sismos de FUNVISIS desde su GeoJSON maravilla.json."""
     start_time = time.time()
     funvisis_url = "http://www.funvisis.gob.ve/maravilla.json"
     headers = {
@@ -646,44 +646,50 @@ def fetch_funvisis_events():
         if response.status_code == 200:
             data = response.json()
             
-            # En caso de que el JSON principal sea un diccionario o una lista directa
-            sismos_list = data.get("sismos", data) if isinstance(data, dict) else data
+            # En caso de que venga como un string JSON
+            if isinstance(data, str):
+                data = json.loads(data)
 
-            for sismo in sismos_list:
+            features = data.get("features", [])
+
+            for feat in features:
                 try:
-                    # Extracción y limpieza de datos con conversiones seguras
-                    raw_id = sismo.get("id") or sismo.get("codigo") or sismo.get("fecha")
-                    if not raw_id:
-                        continue
+                    props = feat.get("properties", {})
+                    geom = feat.get("geometry", {})
+                    coords = geom.get("coordinates", [0, 0])
 
-                    mag = float(sismo.get("magnitud", sismo.get("mag", 0)))
-                    
-                    # Filtro de magnitud mínima (M2.5+)
+                    # 1. Magnitud (viene en el campo "phone")
+                    mag_raw = props.get("phone", "0")
+                    mag = float(mag_raw)
+
+                    # Filtro de Magnitud M2.5+
                     if mag < 1.0:
                         continue
 
-                    lat = float(sismo.get("latitud", sismo.get("lat", 0)))
-                    lng = float(sismo.get("longitud", sismo.get("lng", sismo.get("lon", 0))))
-                    depth = float(sismo.get("profundidad", sismo.get("depth", 0)))
-                    place = sismo.get("ubicacion") or sismo.get("referencia") or sismo.get("place") or "Venezuela"
+                    # 2. Coordenadas [lng, lat]
+                    lng = float(coords[0])
+                    lat = float(coords[1])
 
-                    # Tratamiento del Timestamp/Fecha
-                    timestamp_ms = 0
-                    time_val = sismo.get("fecha") or sismo.get("timestamp") or sismo.get("time")
+                    # 3. Profundidad (viene en "phoneFormatted", e.g. "17.0 km")
+                    depth_raw = props.get("phoneFormatted", "0").replace("km", "").strip()
+                    depth = float(depth_raw)
+
+                    # 4. Ubicación
+                    place = props.get("address", "Venezuela").strip()
+
+                    # 5. Timestamp (Fecha en "postalCode" e.g. "02-08-2026", Hora en "city" e.g. "17:46")
+                    date_str = props.get("postalCode", "")
+                    time_str = props.get("city", "")
                     
-                    if isinstance(time_val, (int, float)):
-                        timestamp_ms = int(time_val * 1000) if time_val < 1e11 else int(time_val)
-                    elif isinstance(time_val, str):
-                        try:
-                            # Intenta parsear ISO-8601 o formato típico 'YYYY-MM-DD HH:MM:SS'
-                            time_val_clean = time_val.replace("Z", "+00:00")
-                            dt = datetime.fromisoformat(time_val_clean)
-                            if dt.tzinfo is None:
-                                dt = dt.replace(tzinfo=timezone.utc)
-                            timestamp_ms = int(dt.timestamp() * 1000)
-                        except ValueError:
-                            # Fallback en caso de formato no estándar de fecha
-                            timestamp_ms = int(time.time() * 1000)
+                    timestamp_ms = int(time.time() * 1000) # Fallback por defecto
+                    if date_str and time_str:
+                        # FUNVISIS publica en hora local de Venezuela (UTC-4)
+                        dt_str = f"{date_str} {time_str} -0400"
+                        dt = datetime.strptime(dt_str, "%d-%m-%Y %H:%M %z")
+                        timestamp_ms = int(dt.timestamp() * 1000)
+
+                    # ID único combinando fecha, hora y coordenadas para evitar colisiones
+                    raw_id = f"{date_str}_{time_str}_{lat}_{lng}".replace(" ", "_")
 
                     events.append({
                         "id": f"funvisis_{raw_id}",
@@ -696,6 +702,7 @@ def fetch_funvisis_events():
                         "timestamp_ms": timestamp_ms,
                         "url": "http://www.funvisis.gob.ve/"
                     })
+
                 except (ValueError, TypeError) as parse_err:
                     logging.warning(f"⚠️ [FUNVISIS] Error parseando elemento individual: {parse_err}")
                     continue
@@ -708,6 +715,7 @@ def fetch_funvisis_events():
         logging.error(f"❌ [FUNVISIS] Error consultando API ({elapsed_ms} ms): {e}")
 
     return events
+
 # ==========================================
 # PROCESAMIENTO Y ENVÍO DE NOTIFICACIONES
 # ==========================================
