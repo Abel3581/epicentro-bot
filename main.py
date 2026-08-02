@@ -630,12 +630,12 @@ def fetch_emsc_events():
 
 
 def fetch_funvisis_events():
-    """Consulta sismos reportados por FUNVISIS (Venezuela)."""
+    """Consulta y parsea los sismos de FUNVISIS desde su endpoint JSON maravilla.json."""
     start_time = time.time()
-    funvisis_url = "http://www.funvisis.gob.ve/"
+    funvisis_url = "http://www.funvisis.gob.ve/maravilla.json"
     headers = {
         "User-Agent": "EpicentroMonitor/2.0 (Android Earthquake Alert System)",
-        "Accept": "application/json, text/html",
+        "Accept": "application/json",
     }
     
     events = []
@@ -644,17 +644,70 @@ def fetch_funvisis_events():
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
 
         if response.status_code == 200:
-            # TODO: Lógica de parsing (JSON o BeautifulSoup) cuando se defina el endpoint exacto.
-            logging.info(f"🔍 [FUNVISIS] Petición exitosa en {elapsed_ms} ms. Eventos válidos: {len(events)}")
+            data = response.json()
+            
+            # En caso de que el JSON principal sea un diccionario o una lista directa
+            sismos_list = data.get("sismos", data) if isinstance(data, dict) else data
+
+            for sismo in sismos_list:
+                try:
+                    # Extracción y limpieza de datos con conversiones seguras
+                    raw_id = sismo.get("id") or sismo.get("codigo") or sismo.get("fecha")
+                    if not raw_id:
+                        continue
+
+                    mag = float(sismo.get("magnitud", sismo.get("mag", 0)))
+                    
+                    # Filtro de magnitud mínima (M2.5+)
+                    if mag < 1.0:
+                        continue
+
+                    lat = float(sismo.get("latitud", sismo.get("lat", 0)))
+                    lng = float(sismo.get("longitud", sismo.get("lng", sismo.get("lon", 0))))
+                    depth = float(sismo.get("profundidad", sismo.get("depth", 0)))
+                    place = sismo.get("ubicacion") or sismo.get("referencia") or sismo.get("place") or "Venezuela"
+
+                    # Tratamiento del Timestamp/Fecha
+                    timestamp_ms = 0
+                    time_val = sismo.get("fecha") or sismo.get("timestamp") or sismo.get("time")
+                    
+                    if isinstance(time_val, (int, float)):
+                        timestamp_ms = int(time_val * 1000) if time_val < 1e11 else int(time_val)
+                    elif isinstance(time_val, str):
+                        try:
+                            # Intenta parsear ISO-8601 o formato típico 'YYYY-MM-DD HH:MM:SS'
+                            time_val_clean = time_val.replace("Z", "+00:00")
+                            dt = datetime.fromisoformat(time_val_clean)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=timezone.utc)
+                            timestamp_ms = int(dt.timestamp() * 1000)
+                        except ValueError:
+                            # Fallback en caso de formato no estándar de fecha
+                            timestamp_ms = int(time.time() * 1000)
+
+                    events.append({
+                        "id": f"funvisis_{raw_id}",
+                        "source": "FUNVISIS",
+                        "magnitude": mag,
+                        "place": place,
+                        "lat": lat,
+                        "lng": lng,
+                        "depth": depth,
+                        "timestamp_ms": timestamp_ms,
+                        "url": "http://www.funvisis.gob.ve/"
+                    })
+                except (ValueError, TypeError) as parse_err:
+                    logging.warning(f"⚠️ [FUNVISIS] Error parseando elemento individual: {parse_err}")
+                    continue
+
+            logging.info(f"🔍 [FUNVISIS] Petición exitosa en {elapsed_ms} ms. Eventos válidos M2.5+: {len(events)}")
         else:
-            logging.warning(f"⚠️ [FUNVISIS] Código de respuesta inesperado HTTP {response.status_code} ({elapsed_ms} ms)")
+            logging.warning(f"⚠️ [FUNVISIS] Código HTTP {response.status_code} ({elapsed_ms} ms)")
     except Exception as e:
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
         logging.error(f"❌ [FUNVISIS] Error consultando API ({elapsed_ms} ms): {e}")
 
     return events
-
-
 # ==========================================
 # PROCESAMIENTO Y ENVÍO DE NOTIFICACIONES
 # ==========================================
