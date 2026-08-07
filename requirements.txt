@@ -5,3 +5,4 @@ urllib3
 google-auth
 timezonefinder
 beautifulsoup4
+geopy
