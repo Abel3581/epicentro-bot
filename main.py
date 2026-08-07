@@ -123,7 +123,7 @@
 #             return local_dt.strftime("%H:%M HS (Local)")
 #     except Exception as e:
 #         logging.warning(f"⚠️ No se pudo determinar huso horario para ({lat}, {lng}): {e}")
-    
+
 #     return utc_dt.strftime("%H:%M UTC")
 
 
@@ -141,7 +141,7 @@
 #         "Cache-Control": "no-cache, no-store, must-revalidate",
 #         "Pragma": "no-cache",
 #     }
-    
+
 #     events = []
 #     try:
 #         response = http_session.get(usgs_url, headers=headers, timeout=8)
@@ -150,12 +150,12 @@
 #         if response.status_code == 200:
 #             data = response.json()
 #             features = data.get("features", [])
-            
+
 #             for feat in features:
 #                 props = feat.get("properties", {})
 #                 geom = feat.get("geometry", {})
 #                 coords = geom.get("coordinates", [0, 0, 0])
-                
+
 #                 mag = props.get("mag")
 #                 # Filtro directo: Magnitud mayor o igual a 2.5
 #                 if mag is None or float(mag) < 2.5:
@@ -179,7 +179,7 @@
 #     except Exception as e:
 #         elapsed_ms = round((time.time() - start_time) * 1000, 2)
 #         logging.error(f"❌ [USGS] Error consultando API ({elapsed_ms} ms): {e}")
-        
+
 #     return events
 
 
@@ -191,7 +191,7 @@
 #         "User-Agent": "EpicentroMonitor/2.0 (Android Earthquake Alert System)",
 #         "Accept": "application/json",
 #     }
-    
+
 #     events = []
 #     try:
 #         response = http_session.get(emsc_url, headers=headers, timeout=8)
@@ -200,12 +200,12 @@
 #         if response.status_code == 200:
 #             data = response.json()
 #             features = data.get("features", [])
-            
+
 #             for feat in features:
 #                 props = feat.get("properties", {})
 #                 geom = feat.get("geometry", {})
 #                 coords = geom.get("coordinates", [0, 0, 0])
-                
+
 #                 mag = props.get("mag")
 #                 if mag is None or float(mag) < 2.5:
 #                     continue
@@ -249,7 +249,7 @@
 #         "User-Agent": "EpicentroMonitor/2.0 (Android Earthquake Alert System)",
 #         "Accept": "application/json",
 #     }
-    
+
 #     events = []
 #     try:
 #         response = http_session.get(funvisis_url, headers=headers, timeout=8)
@@ -257,7 +257,7 @@
 
 #         if response.status_code == 200:
 #             data = response.json()
-            
+
 #             # En caso de que venga como un string JSON
 #             if isinstance(data, str):
 #                 data = json.loads(data)
@@ -292,7 +292,7 @@
 #                     # 5. Timestamp (Fecha en "postalCode" e.g. "02-08-2026", Hora en "city" e.g. "17:46")
 #                     date_str = props.get("postalCode", "")
 #                     time_str = props.get("city", "")
-                    
+
 #                     timestamp_ms = int(time.time() * 1000) # Fallback por defecto
 #                     if date_str and time_str:
 #                         # FUNVISIS publica en hora local de Venezuela (UTC-4)
@@ -426,7 +426,7 @@
 #         usgs_events = fetch_usgs_events()
 #         emsc_events = fetch_emsc_events()
 #         funvisis_events = fetch_funvisis_events()
-        
+
 #         all_events = usgs_events + emsc_events + funvisis_events
 #         if not all_events:
 #             return
@@ -535,14 +535,18 @@ community_detector = SeismicSensorDetector(
     cluster_radius_km=20.0
 )
 
-# Configuración del motor de reintentos HTTP para resiliencia ante caídas breves de red
+# Configuración del motor de reintentos HTTP para resiliencia ante caídas
+# breves de red
 retries = Retry(
     total=3,
     backoff_factor=0.3,
     status_forcelist=[500, 502, 503, 504],
     raise_on_status=False,
 )
-adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+adapter = HTTPAdapter(
+    max_retries=retries,
+    pool_connections=10,
+    pool_maxsize=10)
 
 
 def create_http_session():
@@ -609,7 +613,9 @@ def receive_sensor_report():
         return jsonify({"status": "received"}), 200
 
     except Exception as e:
-        logging.error(f"❌ Error procesando /api/v1/sensor/report: {e}", exc_info=True)
+        logging.error(
+            f"❌ Error procesando /api/v1/sensor/report: {e}",
+            exc_info=True)
         return jsonify({"error": "Error interno al procesar lectura"}), 500
 
 
@@ -623,8 +629,10 @@ def get_fcm_access_token():
     if not fcm_credentials:
         service_account_env = os.environ.get("FIREBASE_SERVICE_ACCOUNT")
         if not service_account_env:
-            logging.error("❌ CRÍTICO: La variable FIREBASE_SERVICE_ACCOUNT no está configurada.")
-            raise ValueError("❌ Falta la variable de entorno FIREBASE_SERVICE_ACCOUNT")
+            logging.error(
+                "❌ CRÍTICO: La variable FIREBASE_SERVICE_ACCOUNT no está configurada.")
+            raise ValueError(
+                "❌ Falta la variable de entorno FIREBASE_SERVICE_ACCOUNT")
 
         service_account_info = json.loads(service_account_env)
         fcm_credentials = service_account.Credentials.from_service_account_info(
@@ -659,8 +667,9 @@ def format_local_time(timestamp_ms, lat, lng):
             local_dt = utc_dt.astimezone(ZoneInfo(tz_name))
             return local_dt.strftime("%H:%M HS (Local)")
     except Exception as e:
-        logging.warning(f"⚠️ No se pudo determinar huso horario para ({lat}, {lng}): {e}")
-    
+        logging.warning(
+            f"⚠️ No se pudo determinar huso horario para ({lat}, {lng}): {e}")
+
     return utc_dt.strftime("%H:%M UTC")
 
 
@@ -678,7 +687,7 @@ def fetch_usgs_events():
         "Cache-Control": "no-cache, no-store, must-revalidate",
         "Pragma": "no-cache",
     }
-    
+
     events = []
     try:
         response = http_session.get(usgs_url, headers=headers, timeout=8)
@@ -687,12 +696,12 @@ def fetch_usgs_events():
         if response.status_code == 200:
             data = response.json()
             features = data.get("features", [])
-            
+
             for feat in features:
                 props = feat.get("properties", {})
                 geom = feat.get("geometry", {})
                 coords = geom.get("coordinates", [0, 0, 0])
-                
+
                 mag = props.get("mag")
                 # Filtro directo: Magnitud mayor o igual a 2.5
                 if mag is None or float(mag) < 2.5:
@@ -710,13 +719,16 @@ def fetch_usgs_events():
                     "url": props.get("url", "")
                 })
 
-            logging.info(f"🔍 [USGS] Petición exitosa en {elapsed_ms} ms. Eventos válidos M2.5+: {len(events)}")
+            logging.info(
+                f"🔍 [USGS] Petición exitosa en {elapsed_ms} ms. Eventos válidos M2.5+: {len(events)}")
         else:
-            logging.warning(f"⚠️ [USGS] Código de respuesta inesperado HTTP {response.status_code} ({elapsed_ms} ms)")
+            logging.warning(
+                f"⚠️ [USGS] Código de respuesta inesperado HTTP {
+                    response.status_code} ({elapsed_ms} ms)")
     except Exception as e:
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
         logging.error(f"❌ [USGS] Error consultando API ({elapsed_ms} ms): {e}")
-        
+
     return events
 
 
@@ -728,7 +740,7 @@ def fetch_emsc_events():
         "User-Agent": "EpicentroMonitor/2.0 (Android Earthquake Alert System)",
         "Accept": "application/json",
     }
-    
+
     events = []
     try:
         response = http_session.get(emsc_url, headers=headers, timeout=8)
@@ -737,12 +749,12 @@ def fetch_emsc_events():
         if response.status_code == 200:
             data = response.json()
             features = data.get("features", [])
-            
+
             for feat in features:
                 props = feat.get("properties", {})
                 geom = feat.get("geometry", {})
                 coords = geom.get("coordinates", [0, 0, 0])
-                
+
                 mag = props.get("mag")
                 if mag is None or float(mag) < 2.5:
                     continue
@@ -750,11 +762,13 @@ def fetch_emsc_events():
                 time_str = props.get("time")
                 timestamp_ms = 0
                 if time_str:
-                    dt = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+                    dt = datetime.fromisoformat(
+                        time_str.replace("Z", "+00:00"))
                     timestamp_ms = int(dt.timestamp() * 1000)
 
                 raw_unid = feat.get("id") or props.get("unid")
-                event_url = props.get("url") or f"https://www.seismicportal.eu/eventdetails.html?unid={raw_unid}"
+                event_url = props.get(
+                    "url") or f"https://www.seismicportal.eu/eventdetails.html?unid={raw_unid}"
 
                 events.append({
                     "id": f"emsc_{raw_unid}",
@@ -768,9 +782,12 @@ def fetch_emsc_events():
                     "url": event_url
                 })
 
-            logging.info(f"🔍 [EMSC] Petición exitosa en {elapsed_ms} ms. Eventos válidos M2.5+: {len(events)}")
+            logging.info(
+                f"🔍 [EMSC] Petición exitosa en {elapsed_ms} ms. Eventos válidos M2.5+: {len(events)}")
         else:
-            logging.warning(f"⚠️ [EMSC] Código de respuesta inesperado HTTP {response.status_code} ({elapsed_ms} ms)")
+            logging.warning(
+                f"⚠️ [EMSC] Código de respuesta inesperado HTTP {
+                    response.status_code} ({elapsed_ms} ms)")
     except Exception as e:
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
         logging.error(f"❌ [EMSC] Error consultando API ({elapsed_ms} ms): {e}")
@@ -786,7 +803,7 @@ def fetch_funvisis_events():
         "User-Agent": "EpicentroMonitor/2.0 (Android Earthquake Alert System)",
         "Accept": "application/json",
     }
-    
+
     events = []
     try:
         response = http_session.get(funvisis_url, headers=headers, timeout=8)
@@ -794,7 +811,7 @@ def fetch_funvisis_events():
 
         if response.status_code == 200:
             data = response.json()
-            
+
             # En caso de que venga como un string JSON
             if isinstance(data, str):
                 data = json.loads(data)
@@ -819,26 +836,33 @@ def fetch_funvisis_events():
                     lng = float(coords[0])
                     lat = float(coords[1])
 
-                    # 3. Profundidad (viene en "phoneFormatted", e.g. "17.0 km")
-                    depth_raw = props.get("phoneFormatted", "0").replace("km", "").strip()
+                    # 3. Profundidad (viene en "phoneFormatted", e.g. "17.0
+                    # km")
+                    depth_raw = props.get(
+                        "phoneFormatted", "0").replace(
+                        "km", "").strip()
                     depth = float(depth_raw)
 
                     # 4. Ubicación
                     place = props.get("address", "Venezuela").strip()
 
-                    # 5. Timestamp (Fecha en "postalCode" e.g. "02-08-2026", Hora en "city" e.g. "17:46")
+                    # 5. Timestamp (Fecha en "postalCode" e.g. "02-08-2026",
+                    # Hora en "city" e.g. "17:46")
                     date_str = props.get("postalCode", "")
                     time_str = props.get("city", "")
-                    
-                    timestamp_ms = int(time.time() * 1000) # Fallback por defecto
+
+                    timestamp_ms = int(
+                        time.time() * 1000)  # Fallback por defecto
                     if date_str and time_str:
                         # FUNVISIS publica en hora local de Venezuela (UTC-4)
                         dt_str = f"{date_str} {time_str} -0400"
                         dt = datetime.strptime(dt_str, "%d-%m-%Y %H:%M %z")
                         timestamp_ms = int(dt.timestamp() * 1000)
 
-                    # ID único combinando fecha, hora y coordenadas para evitar colisiones
-                    raw_id = f"{date_str}_{time_str}_{lat}_{lng}".replace(" ", "_")
+                    # ID único combinando fecha, hora y coordenadas para evitar
+                    # colisiones
+                    raw_id = f"{date_str}_{time_str}_{lat}_{lng}".replace(
+                        " ", "_")
 
                     events.append({
                         "id": f"funvisis_{raw_id}",
@@ -853,15 +877,20 @@ def fetch_funvisis_events():
                     })
 
                 except (ValueError, TypeError) as parse_err:
-                    logging.warning(f"⚠️ [FUNVISIS] Error parseando elemento individual: {parse_err}")
+                    logging.warning(
+                        f"⚠️ [FUNVISIS] Error parseando elemento individual: {parse_err}")
                     continue
 
-            logging.info(f"🔍 [FUNVISIS] Petición exitosa en {elapsed_ms} ms. Eventos válidos M2.5+: {len(events)}")
+            logging.info(
+                f"🔍 [FUNVISIS] Petición exitosa en {elapsed_ms} ms. Eventos válidos M2.5+: {len(events)}")
         else:
-            logging.warning(f"⚠️ [FUNVISIS] Código HTTP {response.status_code} ({elapsed_ms} ms)")
+            logging.warning(
+                f"⚠️ [FUNVISIS] Código HTTP {
+                    response.status_code} ({elapsed_ms} ms)")
     except Exception as e:
         elapsed_ms = round((time.time() - start_time) * 1000, 2)
-        logging.error(f"❌ [FUNVISIS] Error consultando API ({elapsed_ms} ms): {e}")
+        logging.error(
+            f"❌ [FUNVISIS] Error consultando API ({elapsed_ms} ms): {e}")
 
     return events
 
@@ -878,9 +907,11 @@ def process_and_notify_event(sismo, access_token):
 
     delay_minutes = round((now_ms - timestamp_ms) / 60000, 1)
 
-    # Si el evento ocurrió hace más de 1 hora, se descarta para no alertar de cosas viejas
+    # Si el evento ocurrió hace más de 1 hora, se descarta para no alertar de
+    # cosas viejas
     if (now_ms - timestamp_ms) > max_age_ms:
-        logging.info(f"⌛ Evento descartado por antigüedad ({delay_minutes} min de retraso): {event_id}")
+        logging.info(
+            f"⌛ Evento descartado por antigüedad ({delay_minutes} min de retraso): {event_id}")
         return
 
     mag_val = sismo["magnitude"]
@@ -938,14 +969,22 @@ def process_and_notify_event(sismo, access_token):
     }
 
     fcm_start_time = time.time()
-    res = http_session.post(fcm_url, headers=headers_fcm, data=json.dumps(payload), timeout=8)
+    res = http_session.post(
+        fcm_url,
+        headers=headers_fcm,
+        data=json.dumps(payload),
+        timeout=8)
     fcm_elapsed_ms = round((time.time() - fcm_start_time) * 1000, 2)
 
     if res.status_code == 200:
-        logging.info(f"✅ FCM Notificado con éxito: {event_id} ({fcm_elapsed_ms} ms)")
+        logging.info(
+            f"✅ FCM Notificado con éxito: {event_id} ({fcm_elapsed_ms} ms)")
         PROCESSED_EVENTS.add(event_id)
     else:
-        logging.error(f"❌ Error enviando FCM ({res.status_code}) [{fcm_elapsed_ms} ms]: {res.text}")
+        logging.error(
+            f"❌ Error enviando FCM ({
+                res.status_code}) [{fcm_elapsed_ms} ms]: {
+                res.text}")
 
     # Control del tamaño del Cache en memoria RAM
     if len(PROCESSED_EVENTS) > MAX_CACHE_SIZE:
@@ -967,7 +1006,7 @@ def check_earthquakes_and_notify():
         usgs_events = fetch_usgs_events()
         emsc_events = fetch_emsc_events()
         funvisis_events = fetch_funvisis_events()
-        
+
         all_events = usgs_events + emsc_events + funvisis_events
         if not all_events:
             return
@@ -990,23 +1029,31 @@ def check_earthquakes_and_notify():
             new_events_count += 1
 
         total_elapsed = round((time.time() - cycle_start) * 1000, 2)
-        logging.info(f"⏱️ Monitoreo completado en {total_elapsed} ms. Eventos procesados en este ciclo: {new_events_count}")
+        logging.info(
+            f"⏱️ Monitoreo completado en {total_elapsed} ms. Eventos procesados en este ciclo: {new_events_count}")
 
     except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError):
-        logging.warning("⚠️ Conexión de red reseteada. Recreando sesión HTTP...", exc_info=False)
+        logging.warning(
+            "⚠️ Conexión de red reseteada. Recreando sesión HTTP...",
+            exc_info=False)
         http_session = create_http_session()
     except Exception as e:
-        logging.error(f"❌ Error no controlado en rutina de monitoreo: {e}", exc_info=True)
+        logging.error(
+            f"❌ Error no controlado en rutina de monitoreo: {e}",
+            exc_info=True)
 
 
 def worker_loop():
     """Hilo secundario que ejecuta el chequeo infinito cada 15 segundos."""
-    logging.info("🚀 Worker Global M2.5+ iniciado. Frecuencia de escaneo: 15 segundos.")
+    logging.info(
+        "🚀 Worker Global M2.5+ iniciado. Frecuencia de escaneo: 15 segundos.")
     while True:
         try:
             check_earthquakes_and_notify()
         except Exception as e:
-            logging.error(f"❌ Error en el bucle del worker: {e}", exc_info=True)
+            logging.error(
+                f"❌ Error en el bucle del worker: {e}",
+                exc_info=True)
         time.sleep(15)
 
 
@@ -1017,7 +1064,8 @@ def worker_loop():
 threading.Thread(target=worker_loop, daemon=True).start()
 
 if __name__ == "__main__":
-    # Arrancar la app de Flask para escuchar peticiones Web/Healthchecks/Sensores
+    # Arrancar la app de Flask para escuchar peticiones
+    # Web/Healthchecks/Sensores
     port = int(os.environ.get("PORT", 10000))
     logging.info(f"🌍 Servidor Flask iniciando en puerto {port}")
     app.run(host="0.0.0.0", port=port)
