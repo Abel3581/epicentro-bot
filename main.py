@@ -617,11 +617,74 @@ def health_check():
 #             f"❌ Error procesando /api/v1/sensor/report: {e}",
 #             exc_info=True)
 #         return jsonify({"error": "Error interno al procesar lectura"}), 500
+# @app.route("/api/v1/sensor/report", methods=["POST"])
+# def receive_sensor_report():
+#     """
+#     Endpoint que recibe reportes de acelerómetro enviadas por las apps móviles.
+#     Si varias personas reportan sacudidas simultáneas en la misma zona, dispara alerta FCM.
+#     """
+#     try:
+#         payload = request.get_json(force=True)
+#         if not payload:
+#             return jsonify({"error": "Payload JSON requerido"}), 400
+
+#         cluster_detected = community_detector.process_incoming_report(payload)
+
+#         if cluster_detected:
+#             if cluster_detected.cluster_id not in PROCESSED_EVENTS:
+#                 access_token = get_fcm_access_token()
+
+#                 # Usa el valor geocodificado de cluster_detected.place (ej.
+#                 # "Caracas, Venezuela")
+#                 resolved_place = getattr(cluster_detected, 'place', None)
+#                 if not resolved_place:
+#                     resolved_place = f"Cerca de {
+#                         round(
+#                             cluster_detected.center_lat,
+#                             2)}, {
+#                         round(
+#                             cluster_detected.center_lng,
+#                             2)}"
+
+#                 # Calculamos magnitud adecuada estimada (divide entre 2.5 como
+#                 # en tus logs)
+#                 estimated_magnitude = round(
+#                     cluster_detected.avg_intensity / 2.5, 1)
+
+#                 sismo_comunitario = {
+#                     "id": cluster_detected.cluster_id,
+#                     "source": "COMUNITARIO",
+#                     "magnitude": estimated_magnitude,
+#                     "place": resolved_place,  # 👈 ¡AQUÍ ESTÁ EL CAMBIO! Ahora envía "Caracas, Venezuela"
+#                     "description": f"Sismo detectado por red comunitaria ({cluster_detected.readings_count} dispositivos)",
+#                     "lat": cluster_detected.center_lat,
+#                     "lng": cluster_detected.center_lng,
+#                     "depth": 0.0,
+#                     "timestamp_ms": cluster_detected.timestamp_ms,
+#                     "url": "https://epicentro.app"
+#                 }
+
+#                 process_and_notify_event(sismo_comunitario, access_token)
+
+#                 return jsonify({
+#                     "status": "alert_triggered",
+#                     "cluster_id": cluster_detected.cluster_id,
+#                     "place": resolved_place
+#                 }), 200
+
+#         return jsonify({"status": "received"}), 200
+
+#     except Exception as e:
+#         logging.error(
+#             f"❌ Error procesando /api/v1/sensor/report: {e}",
+#             exc_info=True)
+#         return jsonify({"error": "Error interno al procesar lectura"}), 500
 @app.route("/api/v1/sensor/report", methods=["POST"])
 def receive_sensor_report():
-    """
-    Endpoint que recibe reportes de acelerómetro enviadas por las apps móviles.
-    Si varias personas reportan sacudidas simultáneas en la misma zona, dispara alerta FCM.
+    """Endpoint que recibe reportes de acelerómetro enviadas por las apps móviles.
+
+    Si varias personas reportan sacudidas simultáneas en la misma zona, dispara
+    alerta FCM.
     """
     try:
         payload = request.get_json(force=True)
@@ -632,11 +695,10 @@ def receive_sensor_report():
 
         if cluster_detected:
             if cluster_detected.cluster_id not in PROCESSED_EVENTS:
-                access_token = get_fcm_access_token()
+                # Marcar evento como procesado para evitar duplicados
+                PROCESSED_EVENTS.add(cluster_detected.cluster_id)
 
-                # Usa el valor geocodificado de cluster_detected.place (ej.
-                # "Caracas, Venezuela")
-                resolved_place = getattr(cluster_detected, 'place', None)
+                resolved_place = getattr(cluster_detected, "place", None)
                 if not resolved_place:
                     resolved_place = f"Cerca de {
                         round(
@@ -646,40 +708,50 @@ def receive_sensor_report():
                             cluster_detected.center_lng,
                             2)}"
 
-                # Calculamos magnitud adecuada estimada (divide entre 2.5 como
-                # en tus logs)
                 estimated_magnitude = round(
-                    cluster_detected.avg_intensity / 2.5, 1)
+                    cluster_detected.avg_intensity / 2.5, 1
+                )
 
                 sismo_comunitario = {
                     "id": cluster_detected.cluster_id,
                     "source": "COMUNITARIO",
                     "magnitude": estimated_magnitude,
-                    "place": resolved_place,  # 👈 ¡AQUÍ ESTÁ EL CAMBIO! Ahora envía "Caracas, Venezuela"
+                    "place": resolved_place,
                     "description": f"Sismo detectado por red comunitaria ({cluster_detected.readings_count} dispositivos)",
                     "lat": cluster_detected.center_lat,
                     "lng": cluster_detected.center_lng,
                     "depth": 0.0,
                     "timestamp_ms": cluster_detected.timestamp_ms,
-                    "url": "https://epicentro.app"
+                    "url": "https://epicentro.app",
                 }
 
-                process_and_notify_event(sismo_comunitario, access_token)
+                # 🟢 EJECUCIÓN EN SEGUNDO PLANO (THREADING)
+                # Evita que Nominatim y Firebase bloqueen la respuesta HTTP
+                token = get_fcm_access_token()
+                threading.Thread(
+                    target=process_and_notify_event,
+                    args=(sismo_comunitario, token),
+                    daemon=True,
+                ).start()
 
-                return jsonify({
-                    "status": "alert_triggered",
-                    "cluster_id": cluster_detected.cluster_id,
-                    "place": resolved_place
-                }), 200
+                return (
+                    jsonify(
+                        {
+                            "status": "alert_triggered",
+                            "cluster_id": cluster_detected.cluster_id,
+                            "place": resolved_place,
+                        }
+                    ),
+                    200,
+                )
 
         return jsonify({"status": "received"}), 200
 
     except Exception as e:
         logging.error(
-            f"❌ Error procesando /api/v1/sensor/report: {e}",
-            exc_info=True)
+            f"❌ Error procesando /api/v1/sensor/report: {e}", exc_info=True
+        )
         return jsonify({"error": "Error interno al procesar lectura"}), 500
-
 # ==========================================
 # FUNCIONES AUXILIARES Y DE AUTENTICACIÓN
 # ==========================================
