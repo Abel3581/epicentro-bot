@@ -1,18 +1,24 @@
 import time
 import requests
 
-# URL de tu backend en Render
 BASE_URL = "https://epicentro-backend.onrender.com"
 ENDPOINT = f"{BASE_URL}/api/v1/sensor/report"
 
-# Coordenadas de prueba (Caracas)
 LAT = 10.4806
 LNG = -66.9036
 
-print("🚀 Enviando 3 reportes simulados para activar alerta M5.0...")
+# 1. Petición de calentamiento para despertar la instancia de Render
+print("⏳ Despertando servidor Render...")
+try:
+    requests.get(BASE_URL, timeout=15)
+    print("✅ Servidor activo.")
+except Exception:
+    print("⚠️ El servidor tardó en responder, continuando...")
 
-# Se ajustan las aceleraciones para dar un promedio de ~12.5 m/s² de
-# desviación (M5.0)
+time.sleep(2)
+
+print("\n🚀 Enviando 3 reportes simulados para activar alerta M5.0...")
+
 devices = [
     {
         "userId": "sim_device_01",
@@ -20,8 +26,7 @@ devices = [
         "longitude": LNG,
         "accelX": 8.0,
         "accelY": 6.0,
-        # Vector total ≈ 22.36 m/s² -> Desviación ≈ 12.55 m/s² (M5.0)
-        "accelZ": 20.0
+        "accelZ": 20.0,
     },
     {
         "userId": "sim_device_02",
@@ -29,8 +34,7 @@ devices = [
         "longitude": LNG + 0.001,
         "accelX": 7.5,
         "accelY": 6.5,
-        # Vector total ≈ 22.51 m/s² -> Desviación ≈ 12.70 m/s² (M5.1)
-        "accelZ": 20.2
+        "accelZ": 20.2,
     },
     {
         "userId": "sim_device_03",
@@ -38,21 +42,31 @@ devices = [
         "longitude": LNG - 0.001,
         "accelX": 8.2,
         "accelY": 5.8,
-        # Vector total ≈ 22.20 m/s² -> Desviación ≈ 12.39 m/s² (M5.0)
-        "accelZ": 19.8
+        "accelZ": 19.8,
     },
 ]
 
 for dev in devices:
     dev["timestampMs"] = int(time.time() * 1000)
 
-    try:
-        res = requests.post(ENDPOINT, json=dev, timeout=10)
-        print(
-            f"Dispositivo {dev['userId']}: HTTP {res.status_code} -> {res.json()}")
-    except Exception as e:
-        print(f"❌ Error al enviar datos desde {dev['userId']}: {e}")
+    # Reintento en caso de respuesta no JSON
+    for intento in range(2):
+        try:
+            res = requests.post(ENDPOINT, json=dev, timeout=30)
+            data = res.json()  # Intenta parsear JSON
+            print(
+                f"Dispositivo {dev['userId']}: HTTP {res.status_code} -> {data}"
+            )
+            break
+        except Exception as e:
+            if intento == 0:
+                print(
+                    f"⚠️ Fallo en {dev['userId']}, reintentando en 1s... ({e})"
+                )
+                time.sleep(1)
+            else:
+                print(f"❌ Error definitivo en {dev['userId']}: {e}")
 
     time.sleep(1)
 
-print("\n✅ Proceso completado. Revisa la notificación M5.0 en tu teléfono.")
+print("\n✅ Simulación finalizada.")
