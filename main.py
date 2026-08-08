@@ -574,51 +574,6 @@ def health_check():
     }), 200
 
 
-# @app.route("/api/v1/sensor/report", methods=["POST"])
-# def receive_sensor_report():
-#     """
-#     Endpoint que recibe reportes de acelerómetro enviadas por las apps móviles.
-#     Si varias personas reportan sacudidas simultáneas en la misma zona, dispara alerta FCM.
-#     """
-#     try:
-#         payload = request.get_json(force=True)
-#         if not payload:
-#             return jsonify({"error": "Payload JSON requerido"}), 400
-
-#         cluster_detected = community_detector.process_incoming_report(payload)
-
-#         if cluster_detected:
-#             if cluster_detected.cluster_id not in PROCESSED_EVENTS:
-#                 access_token = get_fcm_access_token()
-
-#                 sismo_comunitario = {
-#                     "id": cluster_detected.cluster_id,
-#                     "source": "COMUNITARIO",
-#                     "magnitude": round(cluster_detected.avg_intensity, 1),
-#                     "place": f"Sismo detectado por red comunitaria ({cluster_detected.readings_count} dispositivos)",
-#                     "lat": cluster_detected.center_lat,
-#                     "lng": cluster_detected.center_lng,
-#                     "depth": 0.0,
-#                     "timestamp_ms": cluster_detected.timestamp_ms,
-#                     "url": "https://epicentro.app"
-#                 }
-
-#                 process_and_notify_event(sismo_comunitario, access_token)
-
-#                 return jsonify({
-#                     "status": "alert_triggered",
-#                     "cluster_id": cluster_detected.cluster_id
-#                 }), 200
-
-#         return jsonify({"status": "received"}), 200
-
-#     except Exception as e:
-#         logging.error(
-#             f"❌ Error procesando /api/v1/sensor/report: {e}",
-#             exc_info=True)
-#         return jsonify({"error": "Error interno al procesar lectura"}), 500
-# @app.route("/api/v1/sensor/report", methods=["POST"])
-# def receive_sensor_report():
 #     """
 #     Endpoint que recibe reportes de acelerómetro enviadas por las apps móviles.
 #     Si varias personas reportan sacudidas simultáneas en la misma zona, dispara alerta FCM.
@@ -679,8 +634,8 @@ def health_check():
 #             f"❌ Error procesando /api/v1/sensor/report: {e}",
 #             exc_info=True)
 #         return jsonify({"error": "Error interno al procesar lectura"}), 500
-@app.route("/api/v1/sensor/report", methods=["POST"])
-def receive_sensor_report():
+# @app.route("/api/v1/sensor/report", methods=["POST"])
+# def receive_sensor_report():
     """Endpoint que recibe reportes de acelerómetro enviadas por las apps móviles.
 
     Si varias personas reportan sacudidas simultáneas en la misma zona, dispara
@@ -720,7 +675,7 @@ def receive_sensor_report():
                     "description": f"Sismo detectado por red comunitaria ({cluster_detected.readings_count} dispositivos)",
                     "lat": cluster_detected.center_lat,
                     "lng": cluster_detected.center_lng,
-                    "depth": 0.0,
+                    "depth": 10.0,
                     "timestamp_ms": cluster_detected.timestamp_ms,
                     "url": "https://epicentro.app",
                 }
@@ -752,6 +707,61 @@ def receive_sensor_report():
             f"❌ Error procesando /api/v1/sensor/report: {e}", exc_info=True
         )
         return jsonify({"error": "Error interno al procesar lectura"}), 500
+@app.route("/api/v1/sensor/report", methods=["POST"])
+def receive_sensor_report():
+    try:
+        payload = request.get_json(force=True)
+        if not payload:
+            return jsonify({"error": "Payload JSON requerido"}), 400
+
+        cluster_detected = community_detector.process_incoming_report(payload)
+
+        if cluster_detected:
+            if cluster_detected.cluster_id not in PROCESSED_EVENTS:
+                PROCESSED_EVENTS.add(cluster_detected.cluster_id)
+
+                resolved_place = getattr(cluster_detected, 'place', None)
+                if not resolved_place:
+                    resolved_place = f"Cerca de {round(cluster_detected.center_lat, 2)}, {round(cluster_detected.center_lng, 2)}"
+
+                # Magnitud estimada basada en la aceleración (intensidad / 2.5)
+                estimated_magnitude = round(cluster_detected.avg_intensity / 2.5, 1)
+
+                # Estrutura idéntica a NotificationModel de Android
+                sismo_comunitario = {
+                    "id": cluster_detected.cluster_id,
+                    "title": f"¡ALERTA DE SISMO M {estimated_magnitude}! (COMUNITARIO)",
+                    "place": resolved_place,  # 👈 Nombre de país/ciudad ("Caracas, Venezuela")
+                    "magnitude": estimated_magnitude,
+                    "timestamp": cluster_detected.timestamp_ms,
+                    "depth": 0.0,
+                    "latitude": cluster_detected.center_lat,
+                    "longitude": cluster_detected.center_lng,
+                    "radiusKm": 100.0,  # 👈 Radio de afectación por defecto
+                    "source": "COMUNITARIO",
+                    "url": "https://epicentro.app"
+                }
+
+                # Envío asíncrono para evitar timeouts
+                token = get_fcm_access_token()
+                threading.Thread(
+                    target=process_and_notify_event,
+                    args=(sismo_comunitario, token),
+                    daemon=True
+                ).start()
+
+                return jsonify({
+                    "status": "alert_triggered",
+                    "cluster_id": cluster_detected.cluster_id,
+                    "place": resolved_place
+                }), 200
+
+        return jsonify({"status": "received"}), 200
+
+    except Exception as e:
+        logging.error(f"❌ Error procesando /api/v1/sensor/report: {e}", exc_info=True)
+        return jsonify({"error": "Error interno al procesar lectura"}), 500
+
 # ==========================================
 # FUNCIONES AUXILIARES Y DE AUTENTICACIÓN
 # ==========================================
