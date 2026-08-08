@@ -608,18 +608,20 @@ def receive_sensor_report():
                     "timestamp": cluster_detected.timestamp_ms,
                     "timestamp_ms": cluster_detected.timestamp_ms,
                     "depth": 0.0,
-                    "latitude": cluster_detected.center_lat,
-                    "longitude": cluster_detected.center_lng,
+                    # 👈 Requerido por process_and_notify_event
+                    "lat": cluster_detected.center_lat,
+                    # 👈 Requerido por process_and_notify_event
+                    "lng": cluster_detected.center_lng,
+                    "latitude": cluster_detected.center_lat,   # 👈 Para NotificationModel de Android
+                    "longitude": cluster_detected.center_lng,  # 👈 Para NotificationModel de Android
                     "radiusKm": 100.0,
                     "source": "COMUNITARIO",
                     "url": "https://epicentro.app"
                 }
 
-                # 🟢 FUNCIÓN AUXILIAR PARA PROCESAR Y NOTIFICAR
                 def send_alert_task(event_data):
                     try:
                         token = get_fcm_access_token()
-                        # Llama a tu función de envío FCM
                         process_and_notify_event(event_data, token)
                         logging.info(
                             f"🚀 Notificación FCM enviada con éxito para {
@@ -629,7 +631,6 @@ def receive_sensor_report():
                             f"❌ Error al enviar notificación FCM en hilo: {err}",
                             exc_info=True)
 
-                # Ejecutar el envío en segundo plano
                 threading.Thread(
                     target=send_alert_task,
                     args=(sismo_comunitario,),
