@@ -597,19 +597,16 @@ def receive_sensor_report():
                             cluster_detected.center_lng,
                             2)}"
 
-                # Magnitud estimada basada en la aceleración (intensidad / 2.5)
                 estimated_magnitude = round(
                     cluster_detected.avg_intensity / 2.5, 1)
 
-                # Estructura compatible con NotificationModel de Android y con
-                # process_and_notify_event
                 sismo_comunitario = {
-                    "id": cluster_detected.cluster_id,
+                    "id": str(cluster_detected.cluster_id),
                     "title": f"¡ALERTA DE SISMO M {estimated_magnitude}! (COMUNITARIO)",
                     "place": resolved_place,
                     "magnitude": estimated_magnitude,
                     "timestamp": cluster_detected.timestamp_ms,
-                    "timestamp_ms": cluster_detected.timestamp_ms,  # 👈 ¡AGREGADO! Soluciona KeyError
+                    "timestamp_ms": cluster_detected.timestamp_ms,
                     "depth": 0.0,
                     "latitude": cluster_detected.center_lat,
                     "longitude": cluster_detected.center_lng,
@@ -618,11 +615,24 @@ def receive_sensor_report():
                     "url": "https://epicentro.app"
                 }
 
-                # Envío asíncrono para evitar timeouts
-                token = get_fcm_access_token()
+                # 🟢 FUNCIÓN AUXILIAR PARA PROCESAR Y NOTIFICAR
+                def send_alert_task(event_data):
+                    try:
+                        token = get_fcm_access_token()
+                        # Llama a tu función de envío FCM
+                        process_and_notify_event(event_data, token)
+                        logging.info(
+                            f"🚀 Notificación FCM enviada con éxito para {
+                                event_data['id']}")
+                    except Exception as err:
+                        logging.error(
+                            f"❌ Error al enviar notificación FCM en hilo: {err}",
+                            exc_info=True)
+
+                # Ejecutar el envío en segundo plano
                 threading.Thread(
-                    target=process_and_notify_event,
-                    args=(sismo_comunitario, token),
+                    target=send_alert_task,
+                    args=(sismo_comunitario,),
                     daemon=True
                 ).start()
 
